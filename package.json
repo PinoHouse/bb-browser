@@ -4,13 +4,19 @@
   "description": "Codex Plugin for session-safe control of the user's signed-in Chrome.",
   "type": "module",
   "bin": {
-    "bb-browser": "./dist/cli.js",
     "bb-browser-mcp": "./dist/mcp.js"
   },
-  "main": "./dist/cli.js",
+  "main": "./dist/mcp.js",
   "files": [
+    ".codex-plugin",
+    ".mcp.json",
+    ".agents/plugins",
+    "bin/bb-browser-mcp",
     "dist",
     "extension",
+    "skills",
+    "scripts/install-native-host.mjs",
+    "scripts/uninstall-native-host.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -34,34 +40,28 @@
     "agent",
     "chrome",
     "extension",
-    "cli",
-    "puppeteer",
-    "playwright",
-    "cdp",
+    "native-messaging",
+    "codex-plugin",
     "mcp"
   ],
-  "author": "",
+  "author": "PinoHouse",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/epiral/bb-browser.git"
+    "url": "git+https://github.com/PinoHouse/bb-browser.git"
   },
   "bugs": {
-    "url": "https://github.com/epiral/bb-browser/issues"
+    "url": "https://github.com/PinoHouse/bb-browser/issues"
   },
-  "homepage": "https://github.com/epiral/bb-browser#readme",
+  "homepage": "https://github.com/PinoHouse/bb-browser#readme",
   "engines": {
     "node": ">=20.0.0"
   },
   "packageManager": "pnpm@9.15.0",
   "dependencies": {
-    "@bufbuild/protobuf": "^2.11.0",
-    "@connectrpc/connect": "^2.1.1",
-    "@connectrpc/connect-node": "^2.1.1",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1",
-    "ws": "^8.18.0"
+    "ajv-formats": "^3.0.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.23.0",
