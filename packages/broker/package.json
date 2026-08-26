@@ -1,0 +1,30 @@
+{
+  "name": "@bb-browser/broker",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist",
+    "lint": "eslint src tsup.config.ts",
+    "test": "tsx --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@bb-browser/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.7.0"
+  }
+}
