@@ -10,6 +10,7 @@ dist/
 
 # Turborepo
 .turbo/
+.worktrees/
 
 # IDE
 .idea/
