@@ -1,20 +1,50 @@
-const STORAGE_KEY = 'upstreamUrl';
-const DEFAULT_URL = 'http://localhost:19824';
+interface NativeStatus {
+  connected: boolean;
+  hostName: string;
+  lastConnectedAt: number | null;
+  lastError: string | null;
+}
 
-const urlInput = document.getElementById('url') as HTMLInputElement;
-const saveBtn = document.getElementById('save') as HTMLButtonElement;
-const statusDiv = document.getElementById('status') as HTMLDivElement;
+const hostName = document.getElementById("host-name") as HTMLElement;
+const extensionId = document.getElementById("extension-id") as HTMLElement;
+const connected = document.getElementById("connected") as HTMLElement;
+const lastConnectedAt = document.getElementById(
+  "last-connected-at",
+) as HTMLElement;
+const lastError = document.getElementById("last-error") as HTMLElement;
+const refresh = document.getElementById("refresh") as HTMLButtonElement;
 
-// 加载当前设置
-chrome.storage.sync.get(STORAGE_KEY, (result) => {
-  urlInput.value = result[STORAGE_KEY] || '';
-  urlInput.placeholder = DEFAULT_URL;
-});
+extensionId.textContent = chrome.runtime.id;
 
-saveBtn.addEventListener('click', async () => {
-  const url = urlInput.value.trim();
-  await chrome.storage.sync.set({ [STORAGE_KEY]: url });
-  statusDiv.textContent = `Saved. ${url ? `Using: ${url}` : `Using default: ${DEFAULT_URL}`}`;
-  statusDiv.className = 'status saved';
-  setTimeout(() => { statusDiv.textContent = ''; }, 3000);
-});
+function render(status: NativeStatus): void {
+  hostName.textContent = status.hostName;
+  connected.textContent = status.connected ? "Connected" : "Disconnected";
+  connected.dataset.state = status.connected ? "connected" : "disconnected";
+  lastConnectedAt.textContent = status.lastConnectedAt
+    ? new Date(status.lastConnectedAt).toLocaleString()
+    : "Never";
+  lastError.textContent = status.lastError ?? "None";
+}
+
+function loadStatus(): void {
+  chrome.runtime.sendMessage(
+    { type: "bb-browser.status" },
+    (status: NativeStatus | undefined) => {
+      if (chrome.runtime.lastError || !status) {
+        render({
+          connected: false,
+          hostName: "com.pinix.bb_browser",
+          lastConnectedAt: null,
+          lastError:
+            chrome.runtime.lastError?.message ??
+            "Background service worker unavailable",
+        });
+        return;
+      }
+      render(status);
+    },
+  );
+}
+
+refresh.addEventListener("click", loadStatus);
+loadStatus();

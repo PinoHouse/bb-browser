@@ -3,6 +3,7 @@
   "name": "bb-browser",
   "version": "0.10.0",
   "description": "Browser automation for AI agents",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxUCkqtdGjiBGF6ZwnRcPrbA0UjAIVoy0Q5B0FIl3CNt31PXIiRQD8Tklcux1TEM77du0EjdtwN6uZUardxb18/J0BKE8v5x05TrNF60P/+q25KGcz8yBZv/44UZxInmpbxQbVvOkFPIGPxnaSK2VKqELunq72JQH8k+B96dFOJ39wwIqxTOaRQqiTg+r8eiPorFtq5f46ApGt7EiiZPkdTKsc8Pyl7wRfdy0pNyGvPbc47Tp12BWOkNkqK3YI5BwWhI9CZd0JkmteGkvC5I5xtVbrV0LNfRxosIgxrBoeIvhhhD2itRXkTh/lpNzSVftkKOF2jELWEQxEDavLD9B6QIDAQAB",
   "permissions": [
     "tabs",
     "activeTab",
@@ -10,7 +11,8 @@
     "debugger",
     "storage",
     "alarms",
-    "history"
+    "history",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "<all_urls>"

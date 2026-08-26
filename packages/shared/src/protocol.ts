@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 /**
  * CLI 与 Chrome Extension 之间的通信协议类型定义
  */
@@ -95,6 +93,8 @@ export interface Request {
   traceCommand?: "start" | "stop" | "status";
   /** history 子命令：search, domains */
   historyCommand?: "search" | "domains";
+  /** history 查询的最大返回数量 */
+  maxResults?: number;
   /** 按键名（press 命令使用） */
   key?: string;
   /** 修饰键列表（press 命令使用） */
@@ -334,5 +334,5 @@ export interface DaemonStatus {
  * @returns UUID v4 格式的字符串
  */
 export function generateId(): string {
-  return randomUUID();
+  return globalThis.crypto.randomUUID();
 }
