@@ -1,12 +1,11 @@
 /**
  * Command Handler for bb-browser Extension
- * 处理从 Daemon 接收的命令
+ * 处理从 Native Host 接收的命令
  * 
  * v2.0: 使用 CDP (chrome.debugger) 实现所有 DOM 操作
  */
 
-import { sendResult, CommandResult } from './api-client';
-import { CommandEvent } from './sse-client';
+import type { CommandResult, ExtensionCommand } from './native-client';
 import * as cdp from './cdp-service';
 import * as cdpDom from './cdp-dom-service';
 import { cleanupTab as cleanupCdpTab } from './cdp-dom-service';
@@ -28,7 +27,7 @@ const tabActiveFrameId = new Map<number, number | null>();
  * 如果 command.tabId 是 number，用它直接获取 tab
  * 否则 fallback 到当前活跃 tab
  */
-async function resolveTab(command: CommandEvent): Promise<chrome.tabs.Tab> {
+async function resolveTab(command: ExtensionCommand): Promise<chrome.tabs.Tab> {
   if (command.tabId !== undefined && typeof command.tabId === 'number') {
     return chrome.tabs.get(command.tabId);
   }
@@ -42,15 +41,19 @@ async function resolveTab(command: CommandEvent): Promise<chrome.tabs.Tab> {
 /**
  * 处理收到的命令
  */
-export async function handleCommand(command: CommandEvent): Promise<void> {
+export async function handleCommand(
+  command: ExtensionCommand,
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   console.log('[CommandHandler] Processing command:', command.id, command.action);
 
   let result: CommandResult;
 
   try {
+    throwIfAborted(signal);
     switch (command.action) {
       case 'open':
-        result = await handleOpen(command);
+        result = await handleOpen(command, signal);
         break;
 
       case 'snapshot':
@@ -94,7 +97,7 @@ export async function handleCommand(command: CommandEvent): Promise<void> {
         break;
 
       case 'wait':
-        result = await handleWait(command);
+        result = await handleWait(command, signal);
         break;
 
       case 'press':
@@ -106,15 +109,15 @@ export async function handleCommand(command: CommandEvent): Promise<void> {
         break;
 
       case 'back':
-        result = await handleBack(command);
+        result = await handleBack(command, signal);
         break;
 
       case 'forward':
-        result = await handleForward(command);
+        result = await handleForward(command, signal);
         break;
 
       case 'refresh':
-        result = await handleRefresh(command);
+        result = await handleRefresh(command, signal);
         break;
 
       case 'eval':
@@ -130,7 +133,7 @@ export async function handleCommand(command: CommandEvent): Promise<void> {
         break;
 
       case 'tab_new':
-        result = await handleTabNew(command);
+        result = await handleTabNew(command, signal);
         break;
 
       case 'tab_select':
@@ -180,7 +183,11 @@ export async function handleCommand(command: CommandEvent): Promise<void> {
           error: `Unknown action: ${command.action}`,
         };
     }
+    throwIfAborted(signal);
   } catch (error) {
+    if (signal?.aborted) {
+      throw abortError(signal);
+    }
     result = {
       id: command.id,
       success: false,
@@ -188,7 +195,7 @@ export async function handleCommand(command: CommandEvent): Promise<void> {
     };
   }
 
-  await sendResult(result);
+  return result;
 }
 
 /**
@@ -201,7 +208,10 @@ export async function handleCommand(command: CommandEvent): Promise<void> {
  *     - "current": 在当前活动 tab 中导航
  *     - number: 在指定 tabId 的 tab 中导航
  */
-async function handleOpen(command: CommandEvent): Promise<CommandResult> {
+async function handleOpen(
+  command: ExtensionCommand,
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   const url = command.url as string;
   const tabIdParam = command.tabId as string | number | undefined;
 
@@ -254,7 +264,7 @@ async function handleOpen(command: CommandEvent): Promise<CommandResult> {
   }
 
   // 等待页面加载完成
-  await waitForTabLoad(tab.id!);
+  await waitForTabLoad(tab.id!, 30000, signal);
 
   // 获取页面信息
   const updatedTab = await chrome.tabs.get(tab.id!);
@@ -274,7 +284,7 @@ async function handleOpen(command: CommandEvent): Promise<CommandResult> {
  * 处理 snapshot 命令 - 获取页面快照
  * v2.0: 使用 CDP Accessibility.getFullAXTree 获取可访问性树
  */
-async function handleSnapshot(command: CommandEvent): Promise<CommandResult> {
+async function handleSnapshot(command: ExtensionCommand): Promise<CommandResult> {
   // 获取目标标签页
   const activeTab = await resolveTab(command);
 
@@ -331,7 +341,7 @@ async function handleSnapshot(command: CommandEvent): Promise<CommandResult> {
  * 处理 click 命令 - 点击元素
  * v2.0: 使用 CDP Input.dispatchMouseEvent
  */
-async function handleClick(command: CommandEvent): Promise<CommandResult> {
+async function handleClick(command: ExtensionCommand): Promise<CommandResult> {
   const ref = command.ref as string;
 
   if (!ref) {
@@ -381,7 +391,7 @@ async function handleClick(command: CommandEvent): Promise<CommandResult> {
  * 处理 hover 命令 - 悬停在元素上
  * v2.0: 使用 CDP Input.dispatchMouseEvent
  */
-async function handleHover(command: CommandEvent): Promise<CommandResult> {
+async function handleHover(command: ExtensionCommand): Promise<CommandResult> {
   const ref = command.ref as string;
 
   if (!ref) {
@@ -430,7 +440,7 @@ async function handleHover(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 fill 命令 - 填充输入框
  */
-async function handleFill(command: CommandEvent): Promise<CommandResult> {
+async function handleFill(command: ExtensionCommand): Promise<CommandResult> {
   const ref = command.ref as string;
   const text = command.text as string;
 
@@ -490,7 +500,7 @@ async function handleFill(command: CommandEvent): Promise<CommandResult> {
  * 处理 type 命令 - 逐字符输入文本（不清空原有内容）
  * v2.0: 使用 CDP Input.dispatchKeyEvent
  */
-async function handleType(command: CommandEvent): Promise<CommandResult> {
+async function handleType(command: ExtensionCommand): Promise<CommandResult> {
   const ref = command.ref as string;
   const text = command.text as string;
 
@@ -549,7 +559,7 @@ async function handleType(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 check 命令 - 勾选复选框
  */
-async function handleCheck(command: CommandEvent): Promise<CommandResult> {
+async function handleCheck(command: ExtensionCommand): Promise<CommandResult> {
   const ref = command.ref as string;
 
   if (!ref) {
@@ -600,7 +610,7 @@ async function handleCheck(command: CommandEvent): Promise<CommandResult> {
  * 处理 uncheck 命令 - 取消勾选复选框
  * v2.0: 使用 CDP Runtime.callFunctionOn
  */
-async function handleUncheck(command: CommandEvent): Promise<CommandResult> {
+async function handleUncheck(command: ExtensionCommand): Promise<CommandResult> {
   const ref = command.ref as string;
 
   if (!ref) {
@@ -651,7 +661,7 @@ async function handleUncheck(command: CommandEvent): Promise<CommandResult> {
  * 处理 select 命令 - 下拉框选择
  * v2.0: 使用 CDP Runtime.callFunctionOn
  */
-async function handleSelect(command: CommandEvent): Promise<CommandResult> {
+async function handleSelect(command: ExtensionCommand): Promise<CommandResult> {
   const ref = command.ref as string;
   const value = command.value as string;
 
@@ -711,7 +721,7 @@ async function handleSelect(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 close 命令 - 关闭当前标签页
  */
-async function handleClose(command: CommandEvent): Promise<CommandResult> {
+async function handleClose(command: ExtensionCommand): Promise<CommandResult> {
   // 获取目标标签页
   const activeTab = await resolveTab(command);
 
@@ -759,7 +769,7 @@ async function handleClose(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 get 命令 - 获取页面或元素信息
  */
-async function handleGet(command: CommandEvent): Promise<CommandResult> {
+async function handleGet(command: ExtensionCommand): Promise<CommandResult> {
   const attribute = command.attribute as string;
 
   if (!attribute) {
@@ -837,7 +847,7 @@ async function handleGet(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 screenshot 命令 - 截取当前页面
  */
-async function handleScreenshot(command: CommandEvent): Promise<CommandResult> {
+async function handleScreenshot(command: ExtensionCommand): Promise<CommandResult> {
   // 获取目标标签页
   const activeTab = await resolveTab(command);
 
@@ -877,7 +887,10 @@ async function handleScreenshot(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 wait 命令 - 等待时间或元素
  */
-async function handleWait(command: CommandEvent): Promise<CommandResult> {
+async function handleWait(
+  command: ExtensionCommand,
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   const waitType = command.waitType as string;
 
   if (waitType === 'time') {
@@ -892,7 +905,7 @@ async function handleWait(command: CommandEvent): Promise<CommandResult> {
     }
 
     console.log('[CommandHandler] Waiting for', ms, 'ms');
-    await new Promise(resolve => setTimeout(resolve, ms));
+    await abortableDelay(ms, signal);
 
     return {
       id: command.id,
@@ -925,7 +938,7 @@ async function handleWait(command: CommandEvent): Promise<CommandResult> {
 
     try {
       // v2.0: 使用 CDP DOM Service
-      await cdpDom.waitForElement(activeTab.id, ref);
+      await raceWithAbort(cdpDom.waitForElement(activeTab.id, ref), signal);
       return {
         id: command.id,
         success: true,
@@ -951,7 +964,7 @@ async function handleWait(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 press 命令 - 发送键盘按键
  */
-async function handlePress(command: CommandEvent): Promise<CommandResult> {
+async function handlePress(command: ExtensionCommand): Promise<CommandResult> {
   const key = command.key as string;
   const modifiers = (command.modifiers as string[]) || [];
 
@@ -1013,7 +1026,7 @@ async function handlePress(command: CommandEvent): Promise<CommandResult> {
  * 处理 scroll 命令 - 滚动页面
  * v2.0: 使用 CDP Input.dispatchMouseEvent (wheel)
  */
-async function handleScroll(command: CommandEvent): Promise<CommandResult> {
+async function handleScroll(command: ExtensionCommand): Promise<CommandResult> {
   const direction = command.direction as string;
   const pixels = (command.pixels as number) || 300;
 
@@ -1072,7 +1085,10 @@ async function handleScroll(command: CommandEvent): Promise<CommandResult> {
  * 处理 back 命令 - 后退
  * v2.0: 使用 CDP Runtime.evaluate
  */
-async function handleBack(command: CommandEvent): Promise<CommandResult> {
+async function handleBack(
+  command: ExtensionCommand,
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   const activeTab = await resolveTab(command);
 
   if (!activeTab.id) {
@@ -1103,7 +1119,7 @@ async function handleBack(command: CommandEvent): Promise<CommandResult> {
     await cdp.evaluate(tabId, 'window.history.back()');
     
     // 等待页面加载
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await abortableDelay(2000, signal);
     
     const updatedTab = await chrome.tabs.get(tabId);
 
@@ -1129,7 +1145,10 @@ async function handleBack(command: CommandEvent): Promise<CommandResult> {
  * 处理 forward 命令 - 前进
  * v2.0: 使用 CDP Runtime.evaluate
  */
-async function handleForward(command: CommandEvent): Promise<CommandResult> {
+async function handleForward(
+  command: ExtensionCommand,
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   const activeTab = await resolveTab(command);
 
   if (!activeTab.id) {
@@ -1148,7 +1167,7 @@ async function handleForward(command: CommandEvent): Promise<CommandResult> {
     await cdp.evaluate(tabId, 'window.history.forward()');
     
     // 等待页面加载
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await abortableDelay(2000, signal);
     
     const updatedTab = await chrome.tabs.get(tabId);
 
@@ -1173,7 +1192,10 @@ async function handleForward(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 refresh 命令 - 刷新页面
  */
-async function handleRefresh(command: CommandEvent): Promise<CommandResult> {
+async function handleRefresh(
+  command: ExtensionCommand,
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   const activeTab = await resolveTab(command);
 
   if (!activeTab.id) {
@@ -1188,7 +1210,7 @@ async function handleRefresh(command: CommandEvent): Promise<CommandResult> {
 
   try {
     await chrome.tabs.reload(activeTab.id);
-    await waitForTabLoad(activeTab.id);
+    await waitForTabLoad(activeTab.id, 30000, signal);
     const updatedTab = await chrome.tabs.get(activeTab.id);
 
     return {
@@ -1213,7 +1235,7 @@ async function handleRefresh(command: CommandEvent): Promise<CommandResult> {
  * 处理 eval 命令 - 在页面执行 JavaScript
  * v2.0: 使用 CDP Runtime.evaluate
  */
-async function handleEval(command: CommandEvent): Promise<CommandResult> {
+async function handleEval(command: ExtensionCommand): Promise<CommandResult> {
   const script = command.script as string;
 
   if (!script) {
@@ -1277,7 +1299,7 @@ async function handleEval(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 tab_list 命令 - 列出所有标签页
  */
-async function handleTabList(command: CommandEvent): Promise<CommandResult> {
+async function handleTabList(command: ExtensionCommand): Promise<CommandResult> {
   console.log('[CommandHandler] Listing all tabs');
 
   try {
@@ -1318,7 +1340,10 @@ async function handleTabList(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 tab_new 命令 - 新建标签页
  */
-async function handleTabNew(command: CommandEvent): Promise<CommandResult> {
+async function handleTabNew(
+  command: ExtensionCommand,
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   const url = command.url as string | undefined;
 
   console.log('[CommandHandler] Creating new tab:', url || 'about:blank');
@@ -1333,7 +1358,7 @@ async function handleTabNew(command: CommandEvent): Promise<CommandResult> {
 
     // 如果有 URL，等待页面加载完成
     if (url && tab.id) {
-      await waitForTabLoad(tab.id);
+      await waitForTabLoad(tab.id, 30000, signal);
     }
 
     // 获取最新的标签页信息
@@ -1361,7 +1386,7 @@ async function handleTabNew(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 tab_select 命令 - 切换到指定标签页
  */
-async function handleTabSelect(command: CommandEvent): Promise<CommandResult> {
+async function handleTabSelect(command: ExtensionCommand): Promise<CommandResult> {
   const index = command.index as number | undefined;
   const tabIdParam = command.tabId as number | undefined;
 
@@ -1421,7 +1446,7 @@ async function handleTabSelect(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 tab_close 命令 - 关闭标签页
  */
-async function handleTabClose(command: CommandEvent): Promise<CommandResult> {
+async function handleTabClose(command: ExtensionCommand): Promise<CommandResult> {
   const index = command.index as number | undefined;
   const tabIdParam = command.tabId as number | undefined;
 
@@ -1495,7 +1520,7 @@ async function handleTabClose(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 frame 命令 - 切换到指定 iframe
  */
-async function handleFrame(command: CommandEvent): Promise<CommandResult> {
+async function handleFrame(command: ExtensionCommand): Promise<CommandResult> {
   const selector = command.selector as string;
 
   if (!selector) {
@@ -1664,7 +1689,7 @@ async function handleFrame(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 frame_main 命令 - 返回主 frame
  */
-async function handleFrameMain(command: CommandEvent): Promise<CommandResult> {
+async function handleFrameMain(command: ExtensionCommand): Promise<CommandResult> {
   console.log('[CommandHandler] Switching to main frame');
 
   // 获取目标标签页
@@ -1699,7 +1724,7 @@ async function handleFrameMain(command: CommandEvent): Promise<CommandResult> {
  * 处理 dialog 命令 - 接受或拒绝对话框
  * v2.0: 使用 CDP Page.handleJavaScriptDialog
  */
-async function handleDialog(command: CommandEvent): Promise<CommandResult> {
+async function handleDialog(command: ExtensionCommand): Promise<CommandResult> {
   const dialogResponse = command.dialogResponse as 'accept' | 'dismiss';
   const promptText = command.promptText as string | undefined;
 
@@ -1772,22 +1797,91 @@ async function handleDialog(command: CommandEvent): Promise<CommandResult> {
 /**
  * 等待标签页加载完成
  */
-function waitForTabLoad(tabId: number, timeout = 30000): Promise<void> {
+function waitForTabLoad(
+  tabId: number,
+  timeout = 30000,
+  signal?: AbortSignal,
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
+    throwIfAborted(signal);
+    const cleanup = () => {
+      clearTimeout(timeoutId);
       chrome.tabs.onUpdated.removeListener(listener);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const timeoutId = setTimeout(() => {
+      cleanup();
       reject(new Error('Tab load timeout'));
     }, timeout);
 
     const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
       if (updatedTabId === tabId && changeInfo.status === 'complete') {
-        clearTimeout(timeoutId);
-        chrome.tabs.onUpdated.removeListener(listener);
+        cleanup();
         resolve();
       }
     };
+    const onAbort = () => {
+      cleanup();
+      reject(abortError(signal));
+    };
 
     chrome.tabs.onUpdated.addListener(listener);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw abortError(signal);
+  }
+}
+
+function abortError(signal?: AbortSignal): Error {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new DOMException('Operation aborted', 'AbortError');
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    throwIfAborted(signal);
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(abortError(signal));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function raceWithAbort<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) {
+    return operation;
+  }
+  return new Promise((resolve, reject) => {
+    throwIfAborted(signal);
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(abortError(signal));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
   });
 }
 
@@ -1798,7 +1892,7 @@ function waitForTabLoad(tabId: number, timeout = 30000): Promise<void> {
 /**
  * 处理 network 命令 - 网络监控和拦截
  */
-async function handleNetwork(command: CommandEvent): Promise<CommandResult> {
+async function handleNetwork(command: ExtensionCommand): Promise<CommandResult> {
   const activeTab = await resolveTab(command);
 
   if (!activeTab.id) {
@@ -1920,7 +2014,7 @@ async function handleNetwork(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 console 命令 - 控制台消息
  */
-async function handleConsole(command: CommandEvent): Promise<CommandResult> {
+async function handleConsole(command: ExtensionCommand): Promise<CommandResult> {
   const activeTab = await resolveTab(command);
 
   if (!activeTab.id) {
@@ -1981,7 +2075,7 @@ async function handleConsole(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 errors 命令 - JS 错误
  */
-async function handleErrors(command: CommandEvent): Promise<CommandResult> {
+async function handleErrors(command: ExtensionCommand): Promise<CommandResult> {
   const activeTab = await resolveTab(command);
 
   if (!activeTab.id) {
@@ -2042,7 +2136,7 @@ async function handleErrors(command: CommandEvent): Promise<CommandResult> {
 /**
  * 处理 trace 命令 - 录制用户操作
  */
-async function handleTrace(command: CommandEvent): Promise<CommandResult> {
+async function handleTrace(command: ExtensionCommand): Promise<CommandResult> {
   const subCommand = (command.traceCommand || 'status') as string;
 
   console.log('[CommandHandler] Trace command:', subCommand);
@@ -2130,7 +2224,7 @@ async function handleTrace(command: CommandEvent): Promise<CommandResult> {
   }
 }
 
-async function handleHistory(command: CommandEvent): Promise<CommandResult> {
+async function handleHistory(command: ExtensionCommand): Promise<CommandResult> {
   const subCommand = (command.historyCommand || 'search') as string;
   const days = typeof command.ms === 'number' && command.ms > 0 ? command.ms : 30;
   const startTime = Date.now() - days * 24 * 60 * 60 * 1000;

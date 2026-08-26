@@ -5,10 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite build --watch --mode development",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "tsx --test src/background/*.test.ts"
+  },
+  "dependencies": {
+    "@bb-browser/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
+    "tsx": "^4.20.6",
     "typescript": "^5.7.3",
     "vite": "^6.1.0",
     "vite-plugin-static-copy": "^2.2.0"

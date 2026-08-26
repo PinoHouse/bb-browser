@@ -11,6 +11,8 @@ export {
   type ResponseData,
   type SSEEvent,
   type SSEEventType,
+  type TraceEvent,
+  type TraceStatus,
   generateId,
 } from "./protocol.js";
 
