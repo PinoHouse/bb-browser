@@ -312,23 +312,6 @@ export interface Response {
   error?: string;
 }
 
-/** SSE 事件类型 */
-export type SSEEventType = "connected" | "heartbeat" | "command";
-
-/** SSE 事件数据 */
-export interface SSEEvent {
-  type: SSEEventType;
-  data: unknown;
-}
-
-/** Daemon 状态 */
-export interface DaemonStatus {
-  running: boolean;
-  extensionConnected: boolean;
-  pendingRequests: number;
-  uptime: number;
-}
-
 /**
  * 生成唯一请求 ID
  * @returns UUID v4 格式的字符串

@@ -2,106 +2,89 @@
 
 ## Architecture
 
-```
-CLI (packages/cli) ──HTTP──▶ Daemon (packages/daemon) ──SSE──▶ Chrome Extension (extension/)
-                                                                      │
-                                                                      ▼ chrome.debugger (CDP)
-                                                                 User's Real Browser
-```
-
-Shared types: `packages/shared/src/protocol.ts`
-
-Adding a new command requires changes in 5 places:
-1. `packages/shared/src/protocol.ts` — ActionType + Request + ResponseData
-2. `extension/manifest.json` — permissions (if new API needed)
-3. `packages/extension/src/background/command-handler.ts` — handler implementation
-4. `packages/cli/src/commands/<name>.ts` — CLI command (follow `trace.ts` pattern)
-5. `packages/cli/src/index.ts` — import, help text, flag parsing, case routing
-
-The daemon is generic — it routes all commands automatically, no changes needed.
-
-## UX Writing Spec (Agent & Human)
-
-bb-browser has two users: **humans** (direct CLI) and **AI Agents** (bash/MCP). The Agent is the bridge — it reads bb-browser output and translates it for the human. Every text surface must serve both.
-
-### `site list` Descriptions
-
-Formula: `{动作} ({English keywords}: {core return fields})`
-
-```
-# Bad — Agent can't match tasks to this
-获取雪球股票实时行情
-
-# Good — searchable in both languages, shows what you get back
-股票实时行情 (stock quote: price, change%, market cap)
+```text
+Codex Plugin MCP Adapter (packages/mcp)
+  │ authenticated Unix socket
+  ▼
+Native Broker Host (packages/broker)
+  │ Chrome Native Messaging
+  ▼
+Chrome Extension (packages/extension)
+  │ chrome.debugger / Chrome APIs
+  ▼
+User's signed-in Chrome
 ```
 
-### `site info <name>`
+Supporting packages:
 
-Agent's function signature. Expose full @meta:
-- `args` with required/optional and description
-- `example` with a runnable command
-- `readOnly`, `domain`
+- `packages/shared`: browser request/response types, protocol v2, structured errors, and frame codec.
+- `packages/client`: session-aware BrowserClient SDK.
+- `packages/sites`: adapter registry, argument mapping, diagnostics, and leased runner.
 
-### JSON Field Naming
+There is no browser CLI, TCP daemon, HTTP command/result endpoint, SSE transport, OpenClaw transport, or alternate browser backend. Do not reintroduce one as a fallback.
 
-Field names ARE the Agent's vocabulary for explaining data to humans.
+## Adding a browser action
 
-| Rule | Bad | Good |
-|------|-----|------|
-| Full English words | `chgPct` | `changePercent` |
-| Values include units | `155` | `"1.55%"` |
-| Large numbers readable | `177320000000` | `"1.77万亿"` |
-| Always include URLs | (missing) | `"url": "https://..."` |
-| ISO timestamps | `1710000000` | `"2026-03-15T01:40:31.000Z"` |
+Most actions require changes in three layers:
 
-### Error Structure
+1. `packages/shared/src/protocol.ts` — action and browser data types.
+2. `packages/extension/src/background/command-handler.ts` — Chrome implementation and abort behavior.
+3. `packages/mcp/src/browser-tools.ts` — MCP schema, deadline, idempotency, and result mapping.
 
-Every error must have three fields:
+Add focused tests in the changed packages. The Broker router is action-agnostic; change it only when ownership, scheduling, lease, cancellation, or retry semantics change.
 
-```json
-{
-  "error": "HTTP 401",
-  "hint": "需要先登录雪球，请先在浏览器中打开 xueqiu.com 并登录",
-  "action": "bb-browser open https://xueqiu.com"
-}
+## Site adapters
+
+- Adapter metadata and execution belong in `packages/sites`.
+- `site_run` is the only normal adapter execution path.
+- Use explicit tab IDs and a per-tab lease for multi-step adapter work.
+- Local adapter overrides must remain diagnostics-visible and must not silently shadow a broken community adapter.
+- Radar execution may use a 120-second deadline; do not increase the global browser deadline to accommodate it.
+
+## Session and tab safety
+
+- Every MCP process owns one Broker session.
+- Pass explicit tab IDs whenever tasks may overlap.
+- Record tabs created by the session and close only those tabs.
+- Never close a pre-existing tab because its domain matches an adapter.
+- Keep same-tab operations serialized; preserve cross-tab concurrency and round-robin fairness between sessions.
+- Propagate cancellation and check deadlines before queueing and again before extension dispatch.
+
+## Error contract
+
+All execution failures use a structured `ProtocolError` with `code`, `phase`, `message`, `retryable`, and optional details.
+
+- `broker_unavailable` and `extension_disconnected` are global infrastructure failures.
+- `adapter_execution_failed` and `request_deadline_exceeded` are item-scoped unless a lightweight browser health probe also fails.
+- After a confirmed global failure, stop the batch and mark later items skipped rather than fabricating per-item failures.
+- Never expose auth tokens or full browser payloads in logs.
+
+## Plugin and Native Host
+
+- `.codex-plugin/plugin.json` and `.mcp.json` define the Codex Plugin.
+- `.agents/plugins/marketplace.json` defines the repository-local PinoHouse marketplace.
+- `scripts/install-native-host.mjs` installs atomically under the user's Application Support directory.
+- The Native Messaging host name is `com.pinix.bb_browser`.
+- The fixed unpacked extension ID is `ncpkoaiijcnacllhjjjfonmbhflmbnii`.
+- Keep the application directory at mode 0700, auth token/socket at 0600, and launcher at 0755.
+
+## Verification
+
+Run from the repository root:
+
+```bash
+pnpm test
+pnpm build
+pnpm test:native-host-install
+python3 /Users/lawrance/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
+git diff --check
 ```
 
-- `error` — technical reason (Agent decides if auto-fixable)
-- `hint` — human-readable explanation (Agent relays verbatim when it can't self-fix)
-- `action` — executable fix command, nullable (Agent tries this first)
+Tests must mock external websites and Chrome where possible. Real Chrome acceptance belongs in the explicit smoke scripts and must use the installed bb-browser Plugin path.
 
-### Post-command Nudges
+## Code conventions
 
-Every command output that has a natural next step should include a one-line hint:
-
-```
-# After site update:
-💡 运行 bb-browser site recommend 看看哪些和你的浏览习惯匹配
-```
-
-### `--help` Grouping
-
-Group by user intent, most important first:
-
-1. **开始使用** — site recommend, site list, site info, site, guide
-2. **浏览器操作** — open, snapshot, click, fill, type, press, scroll
-3. **页面信息** — get, screenshot, eval, fetch
-4. **标签页** — tab
-5. **调试** — network, console, errors, trace, history
-
-### `site recommend`
-
-The primary onboarding command for both humans and Agents:
-- Cross-references `history domains` with `site list`
-- Shows "available" (with example commands) and "not_available" (with visit counts)
-- JSON output structured for Agent capability bootstrap
-
-## Code Conventions
-
-- Commit message: `<type>(<scope>): <summary>` in English
-- Types: `fix` / `feat` / `refactor` / `chore` / `docs`
-- Chinese for user-facing strings, English for code/comments
-- Follow existing patterns: read `trace.ts` before adding a new CLI command
-- Build: `pnpm build` from repo root
-- No tests required for site adapters
+- Commit messages: `<type>(<scope>): <summary>` in English.
+- TypeScript comments and identifiers in English; concise Chinese user-facing errors are acceptable.
+- Preserve protocol compatibility tests whenever message shapes change.
+- Do not log to stdout from the Native Host; stdout is reserved for Chrome Native Messaging frames.

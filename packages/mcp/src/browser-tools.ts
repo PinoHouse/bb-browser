@@ -10,7 +10,7 @@ import {
   textResult,
   toolErrorResult,
   type McpToolResult,
-} from "./result.js";
+} from "./tool-result.js";
 
 export interface BrowserToolClient {
   command(
