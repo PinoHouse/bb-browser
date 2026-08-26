@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bb-browser": {
+      "command": "./bin/bb-browser-mcp",
+      "cwd": "."
+    }
+  }
+}

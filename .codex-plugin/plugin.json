@@ -1,0 +1,37 @@
+{
+  "name": "bb-browser",
+  "version": "0.11.0",
+  "description": "Control the user's real Chrome with session-safe browser tools and site adapters.",
+  "author": {
+    "name": "PinoHouse"
+  },
+  "homepage": "https://github.com/PinoHouse/bb-browser",
+  "repository": "https://github.com/PinoHouse/bb-browser",
+  "license": "MIT",
+  "keywords": [
+    "browser",
+    "chrome",
+    "automation",
+    "site-adapters"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "bb-browser",
+    "shortDescription": "Control your signed-in Chrome",
+    "longDescription": "Use structured browser tools and site adapters against the user's real signed-in Chrome with multi-session isolation.",
+    "developerName": "PinoHouse",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use my signed-in Chrome to inspect this page",
+      "Run a bb-browser site adapter"
+    ],
+    "websiteURL": "https://github.com/PinoHouse/bb-browser",
+    "brandColor": "#2563EB"
+  }
+}

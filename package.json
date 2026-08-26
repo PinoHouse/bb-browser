@@ -1,7 +1,7 @@
 {
   "name": "@pinix/browser",
-  "version": "0.10.1",
-  "description": "Your browser is the API. CLI + MCP server for AI agents to control Chrome with your login state.",
+  "version": "0.11.0",
+  "description": "Codex Plugin for session-safe control of the user's signed-in Chrome.",
   "type": "module",
   "bin": {
     "bb-browser": "./dist/cli.js",
@@ -18,6 +18,9 @@
     "build": "turbo run build && pnpm build:release",
     "build:release": "tsup && pnpm build:extension",
     "build:extension": "rm -rf extension && cp -r packages/extension/dist extension",
+    "install:native-host": "node scripts/install-native-host.mjs",
+    "uninstall:native-host": "node scripts/uninstall-native-host.mjs",
+    "test:native-host-install": "node --test scripts/native-host-install.test.mjs",
     "dev": "turbo run dev",
     "test": "turbo run test",
     "lint": "turbo run lint",
@@ -48,7 +51,7 @@
   },
   "homepage": "https://github.com/epiral/bb-browser#readme",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "packageManager": "pnpm@9.15.0",
   "dependencies": {
