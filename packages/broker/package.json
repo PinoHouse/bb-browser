@@ -19,6 +19,7 @@
     "test": "tsx --test src/*.test.ts"
   },
   "dependencies": {
+    "@bb-browser/client": "workspace:*",
     "@bb-browser/shared": "workspace:*"
   },
   "devDependencies": {
