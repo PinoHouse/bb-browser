@@ -23,3 +23,33 @@ export {
   SSE_MAX_RECONNECT_ATTEMPTS,
   SSE_RECONNECT_DELAY,
 } from "./constants.js";
+
+export {
+  createProtocolError,
+  type ErrorCode,
+  type ErrorPhase,
+  type ProtocolError,
+} from "./errors.js";
+
+export {
+  PROTOCOL_VERSION,
+  isRetryableBeforeDispatch,
+  type BrokerToClientMessage,
+  type BrokerToExtensionMessage,
+  type ClientHello,
+  type ClientToBrokerMessage,
+  type CommandRequest,
+  type CommandResponse,
+  type ExtensionHello,
+  type ExtensionToBrokerMessage,
+  type Heartbeat,
+  type Idempotency,
+  type LeaseAcquire,
+  type LeaseGranted,
+  type LeaseRelease,
+  type RequestCancel,
+  type SessionCloseOwnedTabs,
+  type SessionReady,
+} from "./protocol-v2.js";
+
+export { encodeFrame, FrameDecoder } from "./frame-codec.js";
