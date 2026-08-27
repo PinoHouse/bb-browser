@@ -26,9 +26,9 @@
     "build:extension": "rm -rf extension && cp -r packages/extension/dist extension",
     "install:native-host": "node scripts/install-native-host.mjs",
     "uninstall:native-host": "node scripts/uninstall-native-host.mjs",
-    "test:native-host-install": "node --test scripts/native-host-install.test.mjs",
+    "test:native-host-install": "pnpm build:release && node --test scripts/native-host-install.test.mjs",
     "dev": "turbo run dev",
-    "test": "turbo run test",
+    "test": "turbo run test && pnpm build:release && node --test scripts/native-host-install.test.mjs",
     "lint": "turbo run lint",
     "clean": "turbo run clean && rm -rf node_modules dist extension",
     "prepublishOnly": "pnpm build:release"

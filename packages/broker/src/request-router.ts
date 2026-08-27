@@ -7,7 +7,6 @@ import {
   type CommandRequest,
   type CommandResponse,
   type ExtensionToBrokerMessage,
-  type Idempotency,
   type LeaseAcquire,
   type ProtocolError,
   type RequestCancel,
