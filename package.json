@@ -27,8 +27,9 @@
     "install:native-host": "node scripts/install-native-host.mjs",
     "uninstall:native-host": "node scripts/uninstall-native-host.mjs",
     "test:native-host-install": "pnpm build:release && node --test scripts/native-host-install.test.mjs",
+    "test:mcp-launcher": "node --test scripts/mcp-launcher.test.mjs",
     "dev": "turbo run dev",
-    "test": "turbo run test && pnpm build:release && node --test scripts/native-host-install.test.mjs",
+    "test": "turbo run test && pnpm build:release && node --test scripts/native-host-install.test.mjs scripts/mcp-launcher.test.mjs",
     "lint": "turbo run lint",
     "clean": "turbo run clean && rm -rf node_modules dist extension",
     "prepublishOnly": "pnpm build:release"

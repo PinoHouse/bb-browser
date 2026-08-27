@@ -1,4 +1,28 @@
 #!/bin/sh
 set -eu
 PLUGIN_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-exec node "$PLUGIN_ROOT/dist/mcp.js"
+
+NODE_BIN=${BB_BROWSER_NODE:-}
+if [ -z "$NODE_BIN" ]; then
+  NODE_BIN=$(command -v node 2>/dev/null || true)
+fi
+
+if [ -z "$NODE_BIN" ]; then
+  for CANDIDATE in \
+    /opt/homebrew/bin/node \
+    /usr/local/bin/node \
+    /usr/bin/node
+  do
+    if [ -x "$CANDIDATE" ]; then
+      NODE_BIN=$CANDIDATE
+      break
+    fi
+  done
+fi
+
+if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+  echo "bb-browser MCP requires Node.js 20+; set BB_BROWSER_NODE to its executable path" >&2
+  exit 127
+fi
+
+exec "$NODE_BIN" "$PLUGIN_ROOT/dist/mcp.js"
