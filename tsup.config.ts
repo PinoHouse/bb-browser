@@ -15,7 +15,9 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   target: "node20",
-  splitting: true,  // 共享代码会被提取到 chunk
+  // Native Messaging installs native-host.js by itself, so every entry must be
+  // self-contained rather than importing a source-tree chunk.
+  splitting: false,
   outDir: "dist",
   banner: {
     js: "#!/usr/bin/env node",

@@ -1,6 +1,6 @@
 {
   "name": "bb-browser",
-  "version": "0.11.0",
+  "version": "0.11.0+codex.20260827033321",
   "description": "Control the user's real Chrome with session-safe browser tools and site adapters.",
   "author": {
     "name": "PinoHouse"

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 import { installNativeHost } from "./install-native-host.mjs";
 import { uninstallNativeHost } from "./uninstall-native-host.mjs";
@@ -12,6 +16,26 @@ const EXTENSION_ORIGIN =
 
 async function assertMissing(path) {
   await assert.rejects(access(path), (error) => error?.code === "ENOENT");
+}
+
+async function waitForPath(path, child, stderr) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      await access(path);
+      return;
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    if (child.exitCode !== null) {
+      throw new Error(
+        `Native Host exited with code ${child.exitCode} before creating its socket: ${stderr()}`,
+      );
+    }
+    await delay(50);
+  }
+  throw new Error(`Native Host did not create its socket: ${stderr()}`);
 }
 
 test("installer writes and atomically updates a stable user-level native host", async (t) => {
@@ -95,4 +119,47 @@ test("installer writes and atomically updates a stable user-level native host", 
   await assertMissing(tokenPath);
   await assertMissing(socketPath);
   assert.equal(await readFile(unrelatedPath, "utf8"), "unrelated\n");
+});
+
+test("installed release native host starts without source-tree chunks", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bb-native-release-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const home = join(root, "home");
+  const appRoot = join(home, "Library", "Application Support", "bb-browser");
+  const chromeRoot = join(home, "Library", "Application Support", "Google", "Chrome");
+  const runtimeRoot = join(root, "runtime");
+  const source = fileURLToPath(new URL("../dist/native-host.js", import.meta.url));
+  const { launcherPath } = await installNativeHost({
+    appRoot,
+    chromeRoot,
+    runtimeRoot,
+    source,
+    nodePath: process.execPath,
+  });
+  const socketPath = join(runtimeRoot, "broker.sock");
+  let stderr = "";
+  const child = spawn(launcherPath, [], {
+    env: {
+      ...process.env,
+      HOME: home,
+      BB_BROWSER_SOCKET_PATH: socketPath,
+    },
+    stdio: ["pipe", "ignore", "pipe"],
+  });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  t.after(() => {
+    if (child.exitCode === null) {
+      child.kill("SIGTERM");
+    }
+  });
+
+  await waitForPath(socketPath, child, () => stderr);
+  child.stdin.end();
+  child.kill("SIGTERM");
+  const [code] = await once(child, "exit");
+  assert.equal(code, 0, stderr);
 });
