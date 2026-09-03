@@ -55,6 +55,7 @@ Add focused tests in the changed packages. The Broker router is action-agnostic;
 All execution failures use a structured `ProtocolError` with `code`, `phase`, `message`, `retryable`, and optional details.
 
 - `broker_unavailable` and `extension_disconnected` are global infrastructure failures.
+- `broker_capacity_exceeded` is session-scoped: the Broker session limit or this session's queue is full. Wait for in-flight work and retry; never treat it as a global outage.
 - `adapter_execution_failed` and `request_deadline_exceeded` are item-scoped unless a lightweight browser health probe also fails.
 - After a confirmed global failure, stop the batch and mark later items skipped rather than fabricating per-item failures.
 - Never expose auth tokens or full browser payloads in logs.

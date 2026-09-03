@@ -50,3 +50,25 @@ test("queued sessions are served round-robin", async () => {
   await Promise.all([first, secondA, firstB]);
   assert.deepEqual(order, ["a1", "b1", "a2"]);
 });
+
+test("a full per-session queue rejects with a retryable capacity error", async () => {
+  const scheduler = new ResourceScheduler();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const running = [scheduler.run("session-a", "tab:1", () => gate)];
+  for (let i = 0; i < 100; i++) {
+    running.push(scheduler.run("session-a", "tab:1", async () => {}));
+  }
+  await assert.rejects(
+    scheduler.run("session-a", "tab:1", async () => {}),
+    (error: { code?: string; phase?: string; retryable?: boolean }) =>
+      error.code === "broker_capacity_exceeded" &&
+      error.phase === "queue" &&
+      error.retryable === true,
+  );
+  await scheduler.run("session-b", "tab:2", async () => {});
+  release();
+  await Promise.all(running);
+});

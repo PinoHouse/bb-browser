@@ -31,9 +31,10 @@ export class ResourceScheduler {
     if (this.queuedForSession(sessionId) >= MAX_QUEUED_PER_SESSION) {
       return Promise.reject(
         createProtocolError(
-          "broker_unavailable",
+          "broker_capacity_exceeded",
           "queue",
-          "bb-browser 会话排队请求过多",
+          "bb-browser 当前会话排队请求过多，请等待进行中的请求完成后重试",
+          { retryable: true },
         ),
       );
     }

@@ -37,6 +37,7 @@ Use `site_search` or `site_info` to discover arguments, then use `site_run` for 
 |---|---|---|
 | `broker_unavailable` | Global infrastructure | Stop browser work and report the Broker failure. |
 | `extension_disconnected` | Global infrastructure | Stop browser work and ask for the installed Chrome extension connection to be restored. |
+| `broker_capacity_exceeded` | Current session | The session limit or this session's queue is full. Wait for in-flight requests, then retry; do not stop the batch. |
 | `adapter_execution_failed` | Current adapter item | Record the item failure and continue independent items. |
 | `request_deadline_exceeded` | Current request | Record the timeout and continue independent items. |
 
