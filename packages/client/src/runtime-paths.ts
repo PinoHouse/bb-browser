@@ -8,9 +8,11 @@ export interface RuntimePathOptions {
 
 export function getRuntimePaths(options: RuntimePathOptions = {}) {
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  const runtimeRoot = options.runtimeRoot ?? join(tmpdir(), `bb-browser-${uid}`);
+  const runtimeRoot =
+    options.runtimeRoot ?? join(tmpdir(), `bb-browser-${uid}`);
   const configRoot =
     options.configRoot ??
+    process.env.BB_BROWSER_CONFIG_ROOT ??
     join(homedir(), "Library", "Application Support", "bb-browser");
 
   return {

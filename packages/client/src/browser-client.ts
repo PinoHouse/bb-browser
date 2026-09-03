@@ -1,518 +1,445 @@
-import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import {
-  PROTOCOL_VERSION,
   createProtocolError,
-  type BrokerToClientMessage,
-  type CommandRequest,
+  type BrokerHealth,
   type CommandResponse,
-  type Idempotency,
-  type LeaseGranted,
   type ProtocolError,
-  type Request,
   type SessionReady,
 } from "@bb-browser/shared";
-import { getRuntimePaths } from "./runtime-paths.js";
 import {
-  connectSocketTransport,
-  type MessageTransport,
-} from "./socket-transport.js";
+  BrowserConnection,
+  type BrowserClientOptions,
+  type CommandInput,
+  type CommandOptions,
+} from "./browser-connection.js";
+import type { MessageTransport } from "./socket-transport.js";
 
-export type CommandInput = Omit<Request, "id">;
+export type {
+  BrowserClientOptions,
+  CommandInput,
+  CommandOptions,
+} from "./browser-connection.js";
 
-export interface CommandOptions {
-  timeoutMs: number;
-  idempotency: Idempotency;
-  signal?: AbortSignal;
-  leaseId?: string;
+export interface ConnectionStatus {
+  connected: boolean;
+  generation: number;
+  clientId?: string;
+  sessionId?: string;
+  brokerInstanceId?: string;
+  resumed?: boolean;
+  reconnectAttempts: number;
+  lastError?: ProtocolError;
+  contextLost: boolean;
 }
 
-export interface BrowserClientOptions {
-  clientName: string;
-  authToken?: string;
-  socketPath?: string;
-  connectTimeoutMs?: number;
-  resumeSessionId?: string;
-  resumeClientId?: string;
-}
-
-interface PendingRequest<T> {
-  action: string | null;
-  idempotency: Idempotency;
-  dispatched: boolean;
-  cancelSent: boolean;
-  timer: NodeJS.Timeout;
-  signal?: AbortSignal;
-  abortListener?: () => void;
-  resolve: (value: T) => void;
-  reject: (error: ProtocolError) => void;
-}
-
-const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
-
+/** Stable process-scoped facade. Recovery never replays a submitted operation. */
 export class BrowserClient {
-  private readonly pending = new Map<
-    string,
-    PendingRequest<CommandResponse | LeaseGranted>
-  >();
-  private disconnected = false;
+  private connection?: BrowserConnection;
+  private identity?: SessionReady;
+  private attempt?: {
+    promise: Promise<BrowserConnection>;
+    controller: AbortController;
+  };
+  private waiters = 0;
+  private closed = false;
+  private generation = 0;
+  private revision = 0;
+  private contextLost = false;
+  private reconnectAttempts = 0;
+  private lastError?: ProtocolError;
+  private readonly leases = new Map<string, number>();
 
-  private constructor(
-    private readonly transport: MessageTransport,
-    public readonly clientId: string,
-    public readonly sessionId: string,
-  ) {
-    transport.on("message", this.handleMessage);
-    transport.on("close", this.handleDisconnect);
-    transport.on("error", this.handleTransportError);
+  private constructor(private readonly options: BrowserClientOptions) {}
+
+  static create(
+    options: BrowserClientOptions = { clientName: "bb-browser-client" },
+  ): BrowserClient {
+    return new BrowserClient(options);
   }
 
   static async connect(
     options: BrowserClientOptions = { clientName: "bb-browser-client" },
   ): Promise<BrowserClient> {
-    const paths = getRuntimePaths();
-    let authToken = options.authToken;
-    if (!authToken) {
-      try {
-        authToken = (await readFile(paths.tokenPath, "utf8")).trim();
-      } catch {
-        throw createProtocolError(
-          "broker_unavailable",
-          "connect",
-          "无法读取 bb-browser 认证令牌",
-        );
-      }
-    }
-
-    let transport: MessageTransport;
+    const client = BrowserClient.create(options);
     try {
-      transport = await connectSocketTransport(
-        options.socketPath ?? paths.socketPath,
+      await client.ensureConnected(
+        options.recoveryTimeoutMs ?? 10_000,
+        options.signal,
       );
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      const detail =
-        code === "ENOENT" || code === "ECONNREFUSED"
-          ? "bb-browser Broker 尚未运行"
-          : `无法连接 bb-browser Broker：${String(error)}`;
-      throw createProtocolError("broker_unavailable", "connect", detail);
+      client.close();
+      throw error;
     }
-
-    return BrowserClient.fromConnectedTransport(transport, {
-      ...options,
-      authToken,
-    });
+    return client;
   }
 
   static async fromConnectedTransport(
     transport: MessageTransport,
     options: BrowserClientOptions,
   ): Promise<BrowserClient> {
-    return new Promise<BrowserClient>((resolve, reject) => {
-      let settled = false;
-      const timeoutMs =
-        options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    const client = BrowserClient.create(options);
+    client.adopt(
+      await BrowserConnection.fromConnectedTransport(transport, options),
+    );
+    return client;
+  }
 
-      const cleanup = () => {
-        clearTimeout(timer);
-        transport.off("message", handleMessage);
-        transport.off("close", handleClose);
-        transport.off("error", handleError);
-      };
-      const fail = (error: ProtocolError) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        cleanup();
-        reject(error);
-      };
-      const handleMessage = (value: unknown) => {
-        const message = value as Partial<SessionReady>;
-        if (message.kind !== "session.ready") {
-          return;
-        }
-        if (message.protocolVersion !== PROTOCOL_VERSION) {
-          fail(
-            createProtocolError(
-              "protocol_version_mismatch",
-              "handshake",
-              "bb-browser Broker 协议版本不兼容",
-              { retryable: false },
-            ),
-          );
-          return;
-        }
-        if (!message.clientId || !message.sessionId) {
-          fail(
-            createProtocolError(
-              "protocol_version_mismatch",
-              "handshake",
-              "bb-browser Broker 握手响应不完整",
-              { retryable: false },
-            ),
-          );
-          return;
-        }
-        if (settled) {
-          return;
-        }
-        settled = true;
-        cleanup();
-        resolve(
-          new BrowserClient(transport, message.clientId, message.sessionId),
-        );
-      };
-      const handleClose = () => {
-        fail(
-          createProtocolError(
-            "extension_disconnected",
-            "handshake",
-            "bb-browser 连接在握手期间中断",
-          ),
-        );
-      };
-      const handleError = (error: Error) => {
-        fail(
-          createProtocolError(
-            "broker_unavailable",
-            "handshake",
-            `bb-browser Broker 握手失败：${error.message}`,
-          ),
-        );
-      };
-      const timer = setTimeout(() => {
-        fail(
-          createProtocolError(
-            "broker_unavailable",
-            "handshake",
-            "bb-browser Broker 握手超时",
-          ),
-        );
-      }, timeoutMs);
+  get clientId(): string {
+    return this.identity?.clientId ?? "";
+  }
+  get sessionId(): string {
+    return this.identity?.sessionId ?? "";
+  }
+  get connectionGeneration(): number {
+    return this.generation;
+  }
 
-      transport.on("message", handleMessage);
-      transport.on("close", handleClose);
-      transport.on("error", handleError);
-      transport.send({
-        kind: "client.hello",
-        protocolVersion: PROTOCOL_VERSION,
-        clientName: options.clientName,
-        authToken: options.authToken ?? "",
-        resumeSessionId: options.resumeSessionId,
-        resumeClientId: options.resumeClientId,
-      });
-    });
+  status(): ConnectionStatus {
+    return {
+      connected: this.connection?.connected ?? false,
+      generation: this.generation,
+      clientId: this.identity?.clientId,
+      sessionId: this.identity?.sessionId,
+      brokerInstanceId: this.identity?.brokerInstanceId,
+      resumed: this.identity?.resumed,
+      reconnectAttempts: this.reconnectAttempts,
+      lastError: this.lastError,
+      contextLost: this.contextLost,
+    };
+  }
+
+  async ensureConnected(
+    timeoutMs = 10_000,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.acquire(Date.now() + timeoutMs, signal);
   }
 
   command(
     input: CommandInput,
     options: CommandOptions,
   ): Promise<CommandResponse> {
-    const requestId = randomUUID();
-    const { action, tabId, ...payload } = input;
-    const message: CommandRequest = {
-      kind: "command.request",
-      protocolVersion: PROTOCOL_VERSION,
-      requestId,
-      clientId: this.clientId,
-      sessionId: this.sessionId,
-      action,
-      tabId,
-      leaseId: options.leaseId,
-      deadlineAt: Date.now() + options.timeoutMs,
-      idempotency: options.idempotency,
-      payload,
+    const deadline = Date.now() + options.timeoutMs;
+    const dispatch = (connection: BrowserConnection) => {
+      this.checkContext(options.connectionGeneration, options.leaseId);
+      if (
+        this.contextLost &&
+        input.tabId === undefined &&
+        !["tab_list", "history", "tab_new", "open"].includes(input.action)
+      )
+        throw this.resetError();
+      return connection.command(input, {
+        ...options,
+        timeoutMs: Math.max(0, deadline - Date.now()),
+      });
     };
-
-    return this.sendPending<CommandResponse>(requestId, message, {
-      action,
-      timeoutMs: options.timeoutMs,
-      idempotency: options.idempotency,
-      signal: options.signal,
-    });
+    try {
+      this.checkAvailable(deadline, options.signal);
+      this.checkContext(options.connectionGeneration, options.leaseId);
+      if (this.connection?.connected) return dispatch(this.connection);
+      return this.acquire(deadline, options.signal).then(dispatch);
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
 
   async withTabLease<T>(
     tabId: number,
     timeoutMs: number,
     work: (leaseId: string) => Promise<T>,
+    options: { signal?: AbortSignal; connectionGeneration?: number } = {},
   ): Promise<T> {
-    const requestId = randomUUID();
-    const granted = await this.sendPending<LeaseGranted>(
-      requestId,
-      {
-        kind: "lease.acquire",
-        protocolVersion: PROTOCOL_VERSION,
-        requestId,
-        sessionId: this.sessionId,
-        tabId,
-        deadlineAt: Date.now() + timeoutMs,
+    const deadline = Date.now() + timeoutMs;
+    this.checkContext(options.connectionGeneration);
+    const connection = this.connection?.connected
+      ? this.connection
+      : await this.acquire(deadline, options.signal);
+    this.checkAvailable(deadline, options.signal);
+    this.checkContext(options.connectionGeneration);
+    const generation = this.generation;
+    return connection.withTabLease(
+      tabId,
+      deadline - Date.now(),
+      async (leaseId) => {
+        this.leases.set(leaseId, generation);
+        try {
+          this.checkContext(generation);
+          const result = await work(leaseId);
+          this.checkContext(generation);
+          if (!connection.connected) throw this.resetError();
+          return result;
+        } finally {
+          this.leases.delete(leaseId);
+        }
       },
-      {
-        action: "lease.acquire",
-        timeoutMs,
-        idempotency: "safe_write",
-      },
+      options.signal,
     );
-
-    try {
-      return await work(granted.leaseId);
-    } finally {
-      this.transport.send({
-        kind: "lease.release",
-        protocolVersion: PROTOCOL_VERSION,
-        sessionId: this.sessionId,
-        leaseId: granted.leaseId,
-      });
-    }
   }
 
-  closeOwnedTabs(timeoutMs = 60_000): Promise<CommandResponse> {
-    const requestId = randomUUID();
-    return this.sendPending<CommandResponse>(
-      requestId,
-      {
-        kind: "session.close_owned_tabs",
-        protocolVersion: PROTOCOL_VERSION,
-        requestId,
-        sessionId: this.sessionId,
-        deadlineAt: Date.now() + timeoutMs,
-      },
-      {
-        action: "close_all",
-        timeoutMs,
-        idempotency: "unsafe_write",
-      },
+  async closeOwnedTabs(
+    timeoutMs = 60_000,
+    signal?: AbortSignal,
+  ): Promise<CommandResponse> {
+    const deadline = Date.now() + timeoutMs;
+    const connection = await this.acquire(deadline, signal);
+    if (this.contextLost) throw this.resetError();
+    return connection.closeOwnedTabs(
+      Math.max(0, deadline - Date.now()),
+      signal,
     );
+  }
+
+  async health(
+    timeoutMs = 10_000,
+    signal?: AbortSignal,
+  ): Promise<{ client: ConnectionStatus; broker?: BrokerHealth }> {
+    const deadline = Date.now() + timeoutMs;
+    try {
+      const connection = await this.acquire(deadline, signal);
+      return {
+        client: this.status(),
+        broker: await connection.health(
+          Math.max(1, deadline - Date.now()),
+          signal,
+        ),
+      };
+    } catch (error) {
+      this.lastError = normalize(error);
+      return { client: this.status() };
+    }
   }
 
   close(): void {
-    if (this.disconnected) {
-      return;
-    }
-    this.disconnected = true;
-    this.rejectAll(
-      createProtocolError(
-        "request_cancelled",
-        "cleanup",
-        "bb-browser Client 已关闭",
-        { retryable: false },
-      ),
-    );
-    this.transport.close();
+    if (this.closed) return;
+    this.closed = true;
+    this.attempt?.controller.abort();
+    this.connection?.close();
+    this.connection = undefined;
+    this.leases.clear();
   }
 
-  private sendPending<T extends CommandResponse | LeaseGranted>(
-    requestId: string,
-    message: unknown,
-    options: {
-      action: string | null;
-      timeoutMs: number;
-      idempotency: Idempotency;
-      signal?: AbortSignal;
-    },
-  ): Promise<T> {
-    if (this.disconnected) {
-      return Promise.reject(
-        createProtocolError(
-          "broker_unavailable",
-          "connect",
-          "bb-browser Client 已断开",
-        ),
+  private checkAvailable(deadline: number, signal?: AbortSignal): void {
+    if (this.closed || signal?.aborted)
+      throw createProtocolError(
+        "request_cancelled",
+        "connect",
+        "bb-browser 请求已取消",
+        { retryable: false },
+      );
+    if (deadline <= Date.now())
+      throw createProtocolError(
+        "request_deadline_exceeded",
+        "connect",
+        "等待浏览器连接超过请求截止时间",
+        { retryable: false },
+      );
+  }
+
+  private checkContext(generation?: number, leaseId?: string): void {
+    if (generation !== undefined && generation !== this.generation)
+      throw this.resetError();
+    if (
+      leaseId &&
+      (this.leases.get(leaseId) !== this.generation ||
+        !this.connection?.connected)
+    )
+      throw this.resetError();
+  }
+
+  private resetError(): ProtocolError {
+    return createProtocolError(
+      "session_reset",
+      "connect",
+      "浏览器连接或会话已变化，请重新确认页面；旧租约和历史标签归属不可沿用",
+      { retryable: false },
+    );
+  }
+
+  private adopt(connection: BrowserConnection): BrowserConnection {
+    if (this.closed) {
+      connection.close();
+      throw createProtocolError(
+        "request_cancelled",
+        "connect",
+        "Client 已关闭",
       );
     }
+    const previousSession =
+      this.identity?.sessionId ?? this.options.resumeSessionId;
+    if (
+      previousSession &&
+      (!connection.ready.resumed ||
+        previousSession !== connection.sessionId ||
+        (this.identity?.brokerInstanceId &&
+          this.identity.brokerInstanceId !== connection.ready.brokerInstanceId))
+    ) {
+      this.revision++;
+      this.contextLost = true;
+      this.lastError = this.resetError();
+    }
+    this.identity = connection.ready;
+    this.connection = connection;
+    this.generation++;
+    connection.on("disconnect", (error: ProtocolError) => {
+      if (this.connection !== connection) return;
+      this.lastError = error;
+      this.leases.clear();
+    });
+    return connection;
+  }
 
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.cancelRequest(requestId);
-        this.rejectPending(
-          requestId,
-          createProtocolError(
-            "request_deadline_exceeded",
-            "execute",
-            `bb-browser 操作超时：${options.action ?? "unknown"}`,
-            {
-              retryable: options.idempotency !== "unsafe_write",
-              action: options.action,
-            },
-          ),
-        );
-      }, options.timeoutMs);
-      const pending: PendingRequest<T> = {
-        action: options.action,
-        idempotency: options.idempotency,
-        dispatched: false,
-        cancelSent: false,
-        timer,
-        signal: options.signal,
-        resolve,
-        reject,
+  private async acquire(
+    deadline: number,
+    signal?: AbortSignal,
+  ): Promise<BrowserConnection> {
+    this.checkAvailable(deadline, signal);
+    if (this.connection?.connected) return this.connection;
+    const revision = this.revision;
+    // Drop a cancelled flight before accepting a new independent caller.
+    if (this.attempt?.controller.signal.aborted) this.attempt = undefined;
+    if (!this.attempt) {
+      const controller = new AbortController();
+      const attempt = {
+        controller,
+        promise: Promise.resolve(undefined as unknown as BrowserConnection),
       };
-      if (options.signal) {
-        pending.abortListener = () => {
-          this.cancelRequest(requestId);
-          this.rejectPending(
-            requestId,
-            createProtocolError(
-              "request_cancelled",
-              "execute",
-              `bb-browser 操作已取消：${options.action ?? "unknown"}`,
-              { retryable: false, action: options.action },
-            ),
-          );
-        };
-        if (options.signal.aborted) {
-          clearTimeout(timer);
+      attempt.promise = this.recover(controller.signal).finally(() => {
+        if (this.attempt === attempt) this.attempt = undefined;
+      });
+      this.attempt = attempt;
+    }
+    const attempt = this.attempt;
+    this.waiters++;
+    try {
+      const remaining = Math.min(
+        deadline - Date.now(),
+        this.options.recoveryTimeoutMs ?? 10_000,
+      );
+      const connection = await waitFor(
+        attempt.promise,
+        remaining,
+        signal,
+        attempt.controller.signal,
+      );
+      this.checkAvailable(deadline, signal);
+      if (revision !== this.revision) throw this.resetError();
+      return connection;
+    } finally {
+      this.waiters--;
+      if (this.waiters === 0 && this.attempt === attempt)
+        attempt.controller.abort();
+    }
+  }
+
+  private async recover(signal: AbortSignal): Promise<BrowserConnection> {
+    const deadline = Date.now() + (this.options.recoveryTimeoutMs ?? 10_000);
+    let retry = 0;
+    while (true) {
+      this.checkAvailable(deadline, signal);
+      try {
+        if (this.identity) this.reconnectAttempts++;
+        const connection = await BrowserConnection.connect({
+          ...this.options,
+          signal,
+          connectTimeoutMs: Math.min(
+            this.options.connectTimeoutMs ?? 5_000,
+            Math.max(1, deadline - Date.now()),
+          ),
+          resumeSessionId:
+            this.identity?.sessionId ?? this.options.resumeSessionId,
+          resumeClientId:
+            this.identity?.clientId ?? this.options.resumeClientId,
+        });
+        if (signal.aborted) {
+          connection.close();
+          this.checkAvailable(deadline, signal);
+        }
+        return this.adopt(connection);
+      } catch (error) {
+        const failure = normalize(error);
+        this.lastError = failure;
+        if (!failure.retryable || signal.aborted || this.closed) throw failure;
+        const delay =
+          Math.min(4_000, 500 * 2 ** retry++) * (0.8 + Math.random() * 0.4);
+        if (Date.now() + delay >= deadline) throw failure;
+        await delayFor(delay, signal);
+      }
+    }
+  }
+}
+
+function normalize(error: unknown): ProtocolError {
+  if (error && typeof error === "object" && "code" in error && "phase" in error)
+    return error as ProtocolError;
+  return createProtocolError(
+    "broker_unavailable",
+    "connect",
+    "无法建立 bb-browser 连接",
+  );
+}
+
+function waitFor<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  shutdown?: AbortSignal,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () =>
+      finish(() =>
+        reject(
+          createProtocolError(
+            "request_cancelled",
+            "connect",
+            "连接等待已取消",
+            { retryable: false },
+          ),
+        ),
+      );
+    const timer = setTimeout(
+      () =>
+        finish(() =>
           reject(
             createProtocolError(
-              "request_cancelled",
-              "execute",
-              `bb-browser 操作已取消：${options.action ?? "unknown"}`,
-              { retryable: false, action: options.action },
+              "request_deadline_exceeded",
+              "connect",
+              "连接恢复等待超时",
+              { retryable: false },
             ),
-          );
-          return;
-        }
-        options.signal.addEventListener("abort", pending.abortListener, {
-          once: true,
-        });
-      }
-
-      this.pending.set(
-        requestId,
-        pending as PendingRequest<CommandResponse | LeaseGranted>,
-      );
-      try {
-        this.transport.send(message);
-        pending.dispatched = true;
-      } catch {
-        this.rejectPending(
-          requestId,
-          createProtocolError(
-            "broker_unavailable",
-            "dispatch",
-            "无法向 bb-browser Broker 发送请求",
-            { action: options.action },
           ),
-        );
-      }
-    });
-  }
-
-  private readonly handleMessage = (value: unknown): void => {
-    const message = value as BrokerToClientMessage;
-    if (message.kind === "heartbeat" || message.kind === "session.ready") {
-      return;
-    }
-    if (message.protocolVersion !== PROTOCOL_VERSION) {
-      this.rejectAll(
-        createProtocolError(
-          "protocol_version_mismatch",
-          "handshake",
-          "bb-browser Broker 返回了不兼容的协议版本",
-          { retryable: false },
         ),
-      );
-      return;
-    }
-    if (message.sessionId !== this.sessionId) {
-      return;
-    }
+      Math.max(0, timeoutMs),
+    );
+    let settled = false;
+    const finish = (work: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      shutdown?.removeEventListener("abort", abort);
+      work();
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    shutdown?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted || shutdown?.aborted) abort();
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
 
-    const pending = this.pending.get(message.requestId);
-    if (!pending) {
-      return;
-    }
-    this.finishPending(message.requestId, pending);
-    if (message.kind === "command.response" && !message.success) {
-      pending.reject(
-        message.error ??
-          createProtocolError(
-            "browser_command_failed",
-            "execute",
-            `浏览器操作失败：${pending.action ?? "unknown"}`,
-            {
-              retryable: false,
-              action: pending.action,
-            },
-          ),
-      );
-      return;
-    }
-    pending.resolve(message);
-  };
-
-  private readonly handleDisconnect = (): void => {
-    if (this.disconnected) {
-      return;
-    }
-    this.disconnected = true;
-    for (const [requestId, pending] of this.pending) {
-      const error = pending.dispatched
-        ? createProtocolError(
-            "result_unknown_after_disconnect",
-            "execute",
-            `连接中断，无法确认操作结果：${pending.action ?? "unknown"}`,
-            { retryable: false, action: pending.action },
-          )
-        : createProtocolError(
-            "extension_disconnected",
-            "dispatch",
-            "浏览器扩展连接已中断",
-            { action: pending.action },
-          );
-      this.finishPending(requestId, pending);
-      pending.reject(error);
-    }
-  };
-
-  private readonly handleTransportError = (): void => {
-    this.handleDisconnect();
-  };
-
-  private cancelRequest(requestId: string): void {
-    const pending = this.pending.get(requestId);
-    if (!pending || pending.cancelSent) {
-      return;
-    }
-    pending.cancelSent = true;
-    try {
-      this.transport.send({
-        kind: "request.cancel",
-        protocolVersion: PROTOCOL_VERSION,
-        requestId,
-        sessionId: this.sessionId,
-      });
-    } catch {
-      // The original request error remains authoritative.
-    }
-  }
-
-  private rejectPending(requestId: string, error: ProtocolError): void {
-    const pending = this.pending.get(requestId);
-    if (!pending) {
-      return;
-    }
-    this.finishPending(requestId, pending);
-    pending.reject(error);
-  }
-
-  private finishPending(
-    requestId: string,
-    pending: PendingRequest<CommandResponse | LeaseGranted>,
-  ): void {
-    this.pending.delete(requestId);
-    clearTimeout(pending.timer);
-    if (pending.signal && pending.abortListener) {
-      pending.signal.removeEventListener("abort", pending.abortListener);
-    }
-  }
-
-  private rejectAll(error: ProtocolError): void {
-    for (const [requestId, pending] of this.pending) {
-      this.finishPending(requestId, pending);
-      pending.reject({ ...error, action: pending.action });
-    }
-  }
+function delayFor(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      reject(createProtocolError("request_cancelled", "connect", "重连已取消"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+  });
 }

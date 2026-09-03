@@ -8,10 +8,7 @@ import {
   type SiteMeta,
   type SiteRegistryOptions,
 } from "./registry.js";
-import {
-  SiteRunner,
-  type BrowserClientLike,
-} from "./runner.js";
+import { SiteRunner, type BrowserClientLike } from "./runner.js";
 
 const DEFAULT_COMMUNITY_REPO = "https://github.com/epiral/bb-sites.git";
 
@@ -78,14 +75,17 @@ export class SiteService {
     return this.runner.run(input);
   }
 
-  async recommend(days = 30): Promise<{
+  async recommend(
+    days = 30,
+    signal?: AbortSignal,
+  ): Promise<{
     days: number;
     available: SiteRecommendation[];
     not_available: Array<{ domain: string; visits: number }>;
   }> {
     const response = await this.client.command(
       { action: "history", historyCommand: "domains", ms: days },
-      { timeoutMs: 60_000, idempotency: "read" },
+      { timeoutMs: 60_000, idempotency: "read", signal },
     );
     const history = response.data?.historyDomains ?? [];
     const available: SiteRecommendation[] = [];
@@ -96,7 +96,8 @@ export class SiteService {
       const adapters = sites.filter(
         (site) =>
           site.domain &&
-          (item.domain === site.domain || item.domain.endsWith(`.${site.domain}`)),
+          (item.domain === site.domain ||
+            item.domain.endsWith(`.${site.domain}`)),
       );
       if (adapters.length > 0) {
         available.push({
@@ -152,9 +153,9 @@ export class SiteService {
       updateMode,
       communityRepo: this.communityRepo,
       communityDir,
-      siteCount: this.registry.list().filter(
-        (site) => site.source === "community",
-      ).length,
+      siteCount: this.registry
+        .list()
+        .filter((site) => site.source === "community").length,
     };
   }
 }

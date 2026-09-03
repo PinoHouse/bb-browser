@@ -3,11 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  CommandResponse,
-  Idempotency,
-  Request,
-} from "@bb-browser/shared";
+import type { CommandResponse, Idempotency, Request } from "@bb-browser/shared";
 import { SiteRegistry } from "./registry.js";
 import { SiteRunner } from "./runner.js";
 
@@ -22,6 +18,8 @@ interface CommandCall {
 }
 
 class FakeBrowserClient {
+  connectionGeneration = 1;
+  async ensureConnected() {}
   commandCalls: CommandCall[] = [];
   leaseCalls: Array<{ tabId: number; timeoutMs: number }> = [];
 
@@ -108,9 +106,13 @@ test("radar runs under a tab lease with a 120 second deadline", async (t) => {
     namedArgs: { query: "NVDA" },
   })) as { status: string };
   assert.equal(result.status, "ok");
-  assert.deepEqual(client.leaseCalls, [{ tabId: 44, timeoutMs: 120_000 }]);
+  assert.equal(client.leaseCalls[0].tabId, 44);
+  assert.ok(
+    client.leaseCalls[0].timeoutMs > 0 &&
+      client.leaseCalls[0].timeoutMs <= 120_000,
+  );
   assert.equal(client.commandCalls.at(-1)?.options.idempotency, "unsafe_write");
-  assert.equal(client.commandCalls.at(-1)?.options.timeoutMs, 120_000);
+  assert.ok(client.commandCalls.at(-1)!.options.timeoutMs <= 120_000);
   assert.equal(client.commandCalls.at(-1)?.options.leaseId, "lease-1");
 });
 
@@ -124,4 +126,46 @@ test("missing required arguments fail before any browser command", async (t) => 
       error.code === "adapter_execution_failed" && error.phase === "adapter",
   );
   assert.equal(client.commandCalls.length, 0);
+});
+
+test("a site workflow stops if connection changes after selecting its tab", async (t) => {
+  const registry = await createRegistry(t);
+  const client = new FakeBrowserClient({
+    tabs: [{ tabId: 44, url: "https://x.com/i/radar" }],
+    evalResult: "{}",
+  });
+  const command = client.command.bind(client);
+  client.command = async (input, options) => {
+    const result = await command(input, options);
+    client.connectionGeneration++;
+    return result;
+  };
+  await assert.rejects(
+    new SiteRunner({ client, registry }).run({ name: "twitter/radar" }),
+    (error: any) => error.code === "session_reset",
+  );
+  assert.equal(
+    client.commandCalls.some((call) => call.input.action === "eval"),
+    false,
+  );
+  assert.equal(client.leaseCalls.length, 0);
+});
+
+test("connection recovery consumes the original site workflow deadline", async (t) => {
+  const registry = await createRegistry(t);
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  const client = new FakeBrowserClient({
+    tabs: [{ tabId: 44, url: "https://x.com/i/radar" }],
+    evalResult: "{}",
+  });
+  client.ensureConnected = async () => {
+    now += 900;
+  };
+  await new SiteRunner({ client, registry }).run({
+    name: "twitter/radar",
+    timeoutMs: 1000,
+  });
+  assert.equal(client.commandCalls.at(-1)?.options.timeoutMs, 100);
+  assert.equal(client.leaseCalls[0].timeoutMs, 100);
 });

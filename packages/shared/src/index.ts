@@ -23,6 +23,12 @@ export {
 
 export {
   PROTOCOL_VERSION,
+  SESSION_RECOVERY_CAPABILITY,
+  type ConnectionError,
+  type SessionEnd,
+  type SessionHealth,
+  type SessionHealthResult,
+  type BrokerHealth,
   isRetryableBeforeDispatch,
   type BrokerToClientMessage,
   type BrokerToExtensionMessage,
