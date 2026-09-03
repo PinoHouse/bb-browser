@@ -189,3 +189,32 @@ test("a missing extension returns a typed dispatch error", async (t) => {
       error.retryable === true,
   );
 });
+
+test("navigating an existing tab never transfers its ownership to the session", async (t) => {
+  const fixture = await createBrokerFixture();
+  t.after(async () => fixture.close());
+  const client = await fixture.connectClient("a");
+
+  const navigate = client.command(
+    { action: "open", url: "https://example.com", tabId: 42 },
+    { timeoutMs: 1_000, idempotency: "unsafe_write" },
+  );
+  await fixture.extension.waitForDispatchCount(1);
+  fixture.extension.resolveNextForTab(42, { tabId: 42, url: "https://example.com" });
+  await navigate;
+
+  const created = client.command(
+    { action: "open", url: "https://example.org" },
+    { timeoutMs: 1_000, idempotency: "safe_write" },
+  );
+  await fixture.extension.waitForDispatchCount(2);
+  fixture.extension.resolveNextForTab(undefined, { tabId: 77, url: "https://example.org" });
+  await created;
+
+  const cleanup = client.closeOwnedTabs(1_000);
+  await fixture.extension.waitForDispatchCount(3);
+  assert.deepEqual(fixture.extension.dispatchedTabIds(), [42, undefined, 77]);
+  fixture.extension.resolveNextForTab(77, { tabId: 77 });
+  const result = (await cleanup).data?.result as { closedTabIds: number[] };
+  assert.deepEqual(result.closedTabIds, [77]);
+});

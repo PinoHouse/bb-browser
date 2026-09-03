@@ -10,7 +10,9 @@ import {
 } from "./registry.js";
 import { SiteRunner, type BrowserClientLike } from "./runner.js";
 
-const DEFAULT_COMMUNITY_REPO = "https://github.com/epiral/bb-sites.git";
+const DEFAULT_COMMUNITY_REPO =
+  process.env.BB_BROWSER_COMMUNITY_REPO ??
+  "https://github.com/PinoHouse/bb-sites.git";
 
 export interface SiteServiceOptions extends SiteRegistryOptions {
   client: BrowserClientLike;

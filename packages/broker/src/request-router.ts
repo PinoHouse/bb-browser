@@ -603,11 +603,16 @@ export class RequestRouter {
     data?: ResponseData,
   ): void {
     const responseTabId = data?.tabId;
-    if (
-      (request.action === "open" || request.action === "tab_new") &&
-      responseTabId !== undefined
-    ) {
-      this.options.sessions.recordOwnedTab(request.sessionId, responseTabId);
+    // `tab_new`, and `open` without a target, create a tab that this session
+    // owns. `open` with a target navigates an existing tab that may belong to
+    // the user, so it only becomes a referenced/default tab below.
+    const createsTab =
+      request.action === "tab_new" ||
+      (request.action === "open" && request.tabId === undefined);
+    if (createsTab) {
+      if (responseTabId !== undefined) {
+        this.options.sessions.recordOwnedTab(request.sessionId, responseTabId);
+      }
       return;
     }
     if (request.action === "close" || request.action === "tab_close") {
