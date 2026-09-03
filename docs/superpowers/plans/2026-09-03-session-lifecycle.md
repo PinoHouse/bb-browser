@@ -57,8 +57,8 @@
 - [x] Preserve explicit tab/context checks and surface session reset; no retry of entire adapters. Add fake-extension integration tests for Broker restart, retained identity, released leases and repeated client start/exit.
 - [x] Review integrated diff for concrete race/isolation/no-replay risks. Address supported findings with scoped tests.
 - [x] Run `pnpm test`, `pnpm lint`, plugin validator, and `git diff --check`; pnpm test includes package builds and release builds. Build the confirmed marketplace source after integration. Installer tests need no equivalent rerun without changes.
-- [ ] Commit verified changes; bring them to the confirmed local marketplace source without overwriting user work. Use cachebuster helper and `codex plugin add bb-browser@pinohouse`; install Native Host with the existing installer.
-- [ ] Verify installed artifact hashes and safe local MCP smoke. Inspect live workload before any Host restart; report any remaining activation boundary truthfully.
+- [x] Commit verified changes; bring them to the confirmed local marketplace source without overwriting user work. Use cachebuster helper and `codex plugin add bb-browser@pinohouse`; install Native Host with the existing installer.
+- [x] Verify installed artifact hashes and safe local MCP smoke. Inspect live workload before any Host restart; report any remaining activation boundary truthfully.
 
 ## Progress
 
@@ -68,3 +68,18 @@
 - Review findings fixed with focused RED/GREEN coverage: SDK cancellation propagation, original site deadline preservation, and late socket errors after close. Fake-clock sleep/wake coverage also passed.
 - One cohesive fix commit replaces the initially suggested per-layer commits because capability negotiation requires the Client and Broker update together.
 - Plugin release version: `0.11.0+codex.20260903120717`. Live Host activation is still pending; the old Host has no in-flight health endpoint, so it must not be interrupted blindly.
+
+## Local rollout evidence
+
+- Fix commit `db43f89` was fast-forwarded into the pre-existing local marketplace-source branch `fix/site-run-daemon-path`; no remote push or main-branch update was performed.
+- `pnpm build` completed with exit 0 in the marketplace source. `codex plugin add bb-browser@pinohouse` installed the new version, and plugin listing confirms it is enabled. Native Host installation completed with the existing installer; the authentication token was preserved.
+- Native Host SHA-256 is `eb9412675f697a6ff69d6eb94621b7ab2b3f942066eb9e888b0310c9aad9d806` in the source build, plugin cache and installed Host. MCP SHA-256 is `99977a9c8aca3309dda1024fd5fdcbcc173ed5e5b7df528993f8688c5aff54e5` in both source build and plugin cache.
+- The installed MCP launcher and installed Native Host bundle passed an isolated fake-extension smoke: lazy initialization, `browser_health` discovery, successful handshake/health, EOF exit 0, zero remaining connections/sessions, and zero browser commands. The initial smoke assertion used `connected` instead of `client.connected`; correcting this test-only field path passed without a product-code change.
+- Previous Host files and manifest are retained under `Library/Application Support/bb-browser/rollback-session-lifecycle.CsnL8Q`. No credentials were copied into this backup.
+- The live Host (PID 38489, started 2026-08-31) was not stopped; existing MCP processes were not killed. This verifies installation, not live activation.
+
+## Activation boundary
+
+After browser automation reaches an idle boundary, reload the existing bb-browser Chrome extension from `chrome://extensions` to launch the updated Host, then start a new Codex task to load the updated MCP tools. The extension's options-page Refresh button only refreshes displayed status; it is not an extension reload. No extension reinstall or permission change is required.
+
+Use `browser_health` in the new task to confirm the live Broker advertises the new diagnostics and its pending/queued counts are zero. Until that check runs, do not report the live browser session as upgraded. This one-time release activation is distinct from the automatic recovery now implemented for subsequent disconnects.
