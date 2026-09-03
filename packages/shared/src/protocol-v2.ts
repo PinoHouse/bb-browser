@@ -2,6 +2,7 @@ import type { ActionType, Request, ResponseData } from "./protocol.js";
 import type { ProtocolError } from "./errors.js";
 
 export const PROTOCOL_VERSION = 2 as const;
+export const SESSION_RECOVERY_CAPABILITY = "session-recovery-v1";
 
 export type Idempotency = "read" | "safe_write" | "unsafe_write";
 
@@ -16,6 +17,7 @@ export interface ClientHello {
   authToken: string;
   resumeSessionId?: string;
   resumeClientId?: string;
+  capabilities?: string[];
 }
 
 export interface SessionReady {
@@ -24,6 +26,48 @@ export interface SessionReady {
   clientId: string;
   sessionId: string;
   resumed: boolean;
+  capabilities?: string[];
+  brokerInstanceId?: string;
+}
+
+export interface ConnectionError {
+  kind: "connection.error";
+  protocolVersion: typeof PROTOCOL_VERSION;
+  error: ProtocolError;
+}
+
+export interface SessionEnd {
+  kind: "session.end";
+  protocolVersion: typeof PROTOCOL_VERSION;
+  sessionId: string;
+}
+
+export interface BrokerHealth {
+  running: boolean;
+  extensionConnected: boolean;
+  activeSessions: number;
+  detachedSessions: number;
+  connections: number;
+  pendingRequests: number;
+  queuedRequests: number;
+  activeLeases: number;
+  protocolVersion: typeof PROTOCOL_VERSION;
+  brokerInstanceId: string;
+}
+
+export interface SessionHealth {
+  kind: "session.health";
+  protocolVersion: typeof PROTOCOL_VERSION;
+  sessionId: string;
+  requestId: string;
+}
+
+export interface SessionHealthResult {
+  kind: "session.health.result";
+  protocolVersion: typeof PROTOCOL_VERSION;
+  sessionId: string;
+  requestId: string;
+  health: BrokerHealth;
 }
 
 export interface CommandRequest {
@@ -114,12 +158,16 @@ export type ClientToBrokerMessage =
   | LeaseRelease
   | RequestCancel
   | SessionCloseOwnedTabs
+  | SessionEnd
+  | SessionHealth
   | Heartbeat;
 
 export type BrokerToClientMessage =
   | SessionReady
   | CommandResponse
   | LeaseGranted
+  | ConnectionError
+  | SessionHealthResult
   | Heartbeat;
 
 export type ExtensionToBrokerMessage =

@@ -8,6 +8,8 @@ import { mapSiteArguments } from "./argument-map.js";
 import { SiteRegistry, type SiteMeta } from "./registry.js";
 
 export interface BrowserClientLike {
+  readonly connectionGeneration?: number;
+  ensureConnected?(timeoutMs?: number, signal?: AbortSignal): Promise<void>;
   command(
     input: CommandInput,
     options: CommandOptions,
@@ -16,6 +18,7 @@ export interface BrowserClientLike {
     tabId: number,
     timeoutMs: number,
     work: (leaseId: string) => Promise<T>,
+    options?: { signal?: AbortSignal; connectionGeneration?: number },
   ): Promise<T>;
 }
 
@@ -54,13 +57,25 @@ export class SiteRunner {
     }
 
     const args = mapSiteArguments(site, input.args, input.namedArgs);
-    const defaultTimeoutMs =
-      site.name === "twitter/radar" ? 120_000 : 60_000;
+    const defaultTimeoutMs = site.name === "twitter/radar" ? 120_000 : 60_000;
     const timeoutMs = Math.min(
       defaultTimeoutMs,
       Math.max(1, input.timeoutMs ?? defaultTimeoutMs),
     );
-    const tabId = await this.resolveTab(site, input.tabId, timeoutMs, input.signal);
+    const deadline = Date.now() + timeoutMs;
+    await this.options.client.ensureConnected?.(
+      remaining(deadline),
+      input.signal,
+    );
+    const generation = this.options.client.connectionGeneration;
+    const tabId = await this.resolveTab(
+      site,
+      input.tabId,
+      deadline,
+      input.signal,
+      generation,
+    );
+    this.checkGeneration(generation);
     const source = this.options.registry.readSource(site);
     const body = source.replace(/\/\*\s*@meta[\s\S]*?\*\//, "").trim();
     const script =
@@ -68,25 +83,32 @@ export class SiteRunner {
       `const __bb_r = await __bb_fn(${JSON.stringify(args)});\n` +
       "JSON.stringify(__bb_r);";
 
-    return this.options.client.withTabLease(tabId, timeoutMs, async (leaseId) => {
-      const response = await this.options.client.command(
-        { action: "eval", script, tabId },
-        {
-          timeoutMs,
-          idempotency: site.readOnly ? "read" : "unsafe_write",
-          signal: input.signal,
-          leaseId,
-        },
-      );
-      return this.parseResult(site, response.data?.result);
-    });
+    return this.options.client.withTabLease(
+      tabId,
+      remaining(deadline),
+      async (leaseId) => {
+        const response = await this.options.client.command(
+          { action: "eval", script, tabId },
+          {
+            timeoutMs: remaining(deadline),
+            idempotency: site.readOnly ? "read" : "unsafe_write",
+            signal: input.signal,
+            leaseId,
+            connectionGeneration: generation,
+          },
+        );
+        return this.parseResult(site, response.data?.result);
+      },
+      { signal: input.signal, connectionGeneration: generation },
+    );
   }
 
   private async resolveTab(
     site: SiteMeta,
     requestedTabId: number | undefined,
-    timeoutMs: number,
+    deadline: number,
     signal?: AbortSignal,
+    generation?: number,
   ): Promise<number> {
     if (requestedTabId !== undefined) {
       return requestedTabId;
@@ -94,15 +116,17 @@ export class SiteRunner {
     const listResponse = await this.options.client.command(
       { action: "tab_list" },
       {
-        timeoutMs: Math.min(timeoutMs, 30_000),
+        timeoutMs: Math.min(remaining(deadline), 30_000),
         idempotency: "read",
         signal,
+        connectionGeneration: generation,
       },
     );
     const tabs = listResponse.data?.tabs ?? [];
+    this.checkGeneration(generation);
     const matching = site.domain
       ? tabs.find((tab) => matchesDomain(tab, site.domain))
-      : tabs.find((tab) => tab.active) ?? tabs[0];
+      : (tabs.find((tab) => tab.active) ?? tabs[0]);
     if (matching) {
       return matching.tabId;
     }
@@ -117,9 +141,10 @@ export class SiteRunner {
     const opened = await this.options.client.command(
       { action: "tab_new", url: `https://${site.domain}` },
       {
-        timeoutMs: Math.min(timeoutMs, 60_000),
+        timeoutMs: Math.min(remaining(deadline), 60_000),
         idempotency: "safe_write",
         signal,
+        connectionGeneration: generation,
       },
     );
     if (opened.data?.tabId === undefined) {
@@ -131,6 +156,20 @@ export class SiteRunner {
       );
     }
     return opened.data.tabId;
+  }
+
+  private checkGeneration(expected?: number): void {
+    if (
+      expected !== undefined &&
+      expected !== this.options.client.connectionGeneration
+    ) {
+      throw createProtocolError(
+        "session_reset",
+        "adapter",
+        "浏览器连接已变化，请重新检查页面后运行适配器",
+        { retryable: false },
+      );
+    }
   }
 
   private parseResult(site: SiteMeta, result: unknown): unknown {
@@ -173,4 +212,16 @@ function matchesDomain(tab: TabInfo, domain: string): boolean {
   } catch {
     return false;
   }
+}
+
+function remaining(deadline: number): number {
+  const ms = deadline - Date.now();
+  if (ms <= 0)
+    throw createProtocolError(
+      "request_deadline_exceeded",
+      "adapter",
+      "适配器已超过原始截止时间",
+      { retryable: false },
+    );
+  return ms;
 }

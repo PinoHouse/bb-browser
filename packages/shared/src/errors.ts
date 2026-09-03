@@ -3,6 +3,9 @@ export type ErrorCode =
   | "extension_disconnected"
   | "protocol_version_mismatch"
   | "session_expired"
+  | "session_reset"
+  | "broker_capacity_exceeded"
+  | "authentication_failed"
   | "tab_not_found"
   | "tab_not_owned"
   | "tab_lease_timeout"
@@ -49,9 +52,11 @@ export function createProtocolError(
     retryable: options.retryable ?? RETRYABLE_CODES.has(code),
     error,
     hint:
-      code === "extension_disconnected"
-        ? "请确认 Chrome 已运行且 bb-browser 扩展已启用"
-        : "请查看 bb-browser 健康状态后重试",
+      code === "session_reset"
+        ? "会话状态已重置，请重新确认页面和标签归属后再操作"
+        : code === "extension_disconnected"
+          ? "请确认 Chrome 已运行且 bb-browser 扩展已启用"
+          : "请查看 bb-browser 健康状态后重试",
     action: options.action ?? null,
   };
 }

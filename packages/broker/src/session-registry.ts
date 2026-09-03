@@ -7,6 +7,7 @@ export interface SessionRecord {
   createdAt: number;
   lastSeenAt: number;
   connected: boolean;
+  connectionId?: string;
   ownedTabs: Set<number>;
   referencedTabs: Set<number>;
   defaultTabId?: number;
@@ -20,19 +21,16 @@ export interface SessionRegistryOptions {
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, SessionRecord>();
-  private readonly idleTimeoutMs: number;
   private readonly maxSessions: number;
 
   constructor(private readonly options: SessionRegistryOptions) {
-    this.idleTimeoutMs = options.idleTimeoutMs ?? 300_000;
     this.maxSessions = options.maxSessions ?? 32;
   }
 
-  create(clientId: string): SessionRecord {
-    this.expire();
+  create(clientId: string, connectionId?: string): SessionRecord {
     if (this.sessions.size >= this.maxSessions) {
       throw createProtocolError(
-        "broker_unavailable",
+        "broker_capacity_exceeded",
         "connect",
         "bb-browser Broker 会话数已达上限",
       );
@@ -44,6 +42,7 @@ export class SessionRegistry {
       createdAt: now,
       lastSeenAt: now,
       connected: true,
+      connectionId,
       ownedTabs: new Set<number>(),
       referencedTabs: new Set<number>(),
     };
@@ -51,18 +50,23 @@ export class SessionRegistry {
     return record;
   }
 
-  resume(sessionId: string, clientId: string): SessionRecord | null {
+  resume(
+    sessionId: string,
+    clientId: string,
+    connectionId?: string,
+  ): SessionRecord | null {
     const record = this.sessions.get(sessionId);
     const now = Date.now();
     if (
       !record ||
       record.connected ||
       record.clientId !== clientId ||
-      now - record.lastSeenAt > this.options.recoveryWindowMs
+      now - record.lastSeenAt >= this.options.recoveryWindowMs
     ) {
       return null;
     }
     record.connected = true;
+    record.connectionId = connectionId;
     record.lastSeenAt = now;
     return record;
   }
@@ -72,23 +76,38 @@ export class SessionRegistry {
     record.lastSeenAt = Date.now();
   }
 
-  disconnect(sessionId: string): void {
+  disconnect(sessionId: string, connectionId?: string): boolean {
     const record = this.sessions.get(sessionId);
-    if (!record) {
-      return;
+    if (!record || !record.connected || record.connectionId !== connectionId) {
+      return false;
     }
     record.connected = false;
     record.lastSeenAt = Date.now();
+    return true;
+  }
+
+  end(sessionId: string, connectionId?: string): boolean {
+    const record = this.sessions.get(sessionId);
+    if (!record || record.connectionId !== connectionId) return false;
+    return this.sessions.delete(sessionId);
+  }
+
+  ownsConnection(sessionId: string, connectionId: string): boolean {
+    const record = this.sessions.get(sessionId);
+    return Boolean(record?.connected && record.connectionId === connectionId);
+  }
+
+  clear(): SessionRecord[] {
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    return sessions;
   }
 
   expire(now = Date.now()): SessionRecord[] {
     const expired: SessionRecord[] = [];
     for (const [sessionId, record] of this.sessions) {
       const idleFor = now - record.lastSeenAt;
-      if (
-        idleFor > this.idleTimeoutMs ||
-        (!record.connected && idleFor > this.options.recoveryWindowMs)
-      ) {
+      if (!record.connected && idleFor >= this.options.recoveryWindowMs) {
         this.sessions.delete(sessionId);
         expired.push(record);
       }

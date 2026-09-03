@@ -76,10 +76,23 @@ Agents call the Plugin-provided `mcp__bb_browser__*` tools directly. The normal 
 
 Tool groups:
 
+- Diagnostics: `browser_health` reports Client/Broker/extension state without opening tabs or running page scripts.
 - Browser: `browser_tab_list`, `browser_open`, `browser_snapshot`, `browser_click`, `browser_fill`, `browser_eval`, `browser_network`, `browser_screenshot`, `browser_close`.
 - Site adapters: `site_list`, `site_search`, `site_info`, `site_recommend`, `site_run`, `site_update`.
 
 `site_run` is the only supported adapter execution path. Adapter execution is capped by an operation deadline; Radar adapters may use up to 120 seconds.
+
+## Session recovery
+
+Connected sessions no longer expire because browser operations are idle. Detached sessions retain their identity and tab ownership for 120 seconds. The SDK establishes connections lazily, coalesces concurrent recovery attempts, and spends at most 10 seconds of the caller's original deadline on recovery. Heartbeats run every 30 seconds with a 90-second response grace period.
+
+Submitted operations are **never automatically replayed**, including `safe_write`, clicks, new tabs and entire adapters. An interrupted request can return `result_unknown_after_disconnect`; a later independent request can use a recovered connection. Every reconnect invalidates old leases. When resume fails, `session_reset` requires fresh page/context checks; historical tab ownership is not reconstructed from domains, and bulk cleanup will not claim those old tabs were closed.
+
+MCP stdin EOF, transport close and termination signals shut down the client and its timers. Session teardown does not automatically close browser tabs. Broker lifecycle events on stderr contain connection/session identifiers and error codes, never credentials or browser payloads.
+
+This requires the `session-recovery-v1` capability in the installed Native Host. Updating source files alone does not upgrade running processes: build both bundles, reinstall the Plugin and Native Host, then recreate old MCP instances and restart the old Native Host at an idle boundary. Chrome permissions and extension command protocol are unchanged. Subsequent Broker replacements can be recovered by the updated Client, subject to the state/reset rules above.
+
+For isolated development/tests, `BB_BROWSER_SOCKET_PATH` overrides the socket and `BB_BROWSER_CONFIG_ROOT` overrides the directory containing `auth-token`. Production defaults remain unchanged.
 
 ## Runtime files
 

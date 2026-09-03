@@ -11,6 +11,9 @@ import {
   encodeFrame,
   FrameDecoder,
   PROTOCOL_VERSION,
+  SESSION_RECOVERY_CAPABILITY,
+  createProtocolError,
+  type ProtocolError,
   type BrokerToClientMessage,
   type ClientHello,
   type ClientToBrokerMessage,
@@ -22,6 +25,8 @@ export interface ClientConnection {
   socket: Socket;
   clientId?: string;
   sessionId?: string;
+  recovery?: boolean;
+  ending?: boolean;
 }
 
 export interface ClientServerOptions {
@@ -29,6 +34,8 @@ export interface ClientServerOptions {
   socketPath: string;
   authToken: string;
   sessions: SessionRegistry;
+  brokerInstanceId: string;
+  cleanup: () => void;
 }
 
 export class ClientServer extends EventEmitter {
@@ -95,6 +102,32 @@ export class ClientServer extends EventEmitter {
     connection.socket.write(Buffer.from(encodeFrame(message)));
   }
 
+  end(connection: ClientConnection): void {
+    connection.ending = true;
+    if (
+      connection.sessionId &&
+      this.options.sessions.end(connection.sessionId, connection.connectionId)
+    ) {
+      this.emit("disconnect", connection.sessionId);
+    }
+    connection.socket.end();
+  }
+
+  private reject(connection: ClientConnection, error: ProtocolError): void {
+    this.trace("connection_rejected", connection, error.code);
+    connection.ending = true;
+    if (connection.recovery) {
+      this.send(connection, {
+        kind: "connection.error",
+        protocolVersion: PROTOCOL_VERSION,
+        error,
+      });
+      connection.socket.end();
+    } else {
+      connection.socket.destroy();
+    }
+  }
+
   get connectionCount(): number {
     return this.connections.size;
   }
@@ -111,19 +144,58 @@ export class ClientServer extends EventEmitter {
     socket.on("data", (chunk) => {
       try {
         for (const value of decoder.push(chunk)) {
+          if (connection.ending) {
+            break;
+          }
           if (!connection.sessionId) {
             this.authenticate(connection, value);
           } else {
+            if (
+              !this.options.sessions.ownsConnection(
+                connection.sessionId,
+                connection.connectionId,
+              )
+            ) {
+              const error = createProtocolError(
+                "session_expired",
+                "queue",
+                "连接会话已过期",
+                { retryable: false },
+              );
+              const message = value as Partial<ClientToBrokerMessage>;
+              if (
+                "requestId" in message &&
+                typeof message.requestId === "string"
+              ) {
+                this.send(connection, {
+                  kind: "command.response",
+                  protocolVersion: PROTOCOL_VERSION,
+                  sessionId: connection.sessionId,
+                  requestId: message.requestId,
+                  success: false,
+                  error,
+                  timing: { queuedMs: 0, executionMs: 0 },
+                });
+              }
+              this.reject(connection, error);
+              break;
+            }
             this.options.sessions.touch(connection.sessionId);
-            this.emit(
-              "message",
-              connection,
-              value as ClientToBrokerMessage,
-            );
+            this.emit("message", connection, value as ClientToBrokerMessage);
           }
         }
-      } catch {
-        socket.destroy();
+      } catch (error) {
+        this.reject(
+          connection,
+          typeof error === "object" && error !== null && "code" in error
+            ? (error as ProtocolError)
+            : createProtocolError(
+                "protocol_version_mismatch",
+                "handshake",
+                "无效的客户端消息",
+                { retryable: false },
+              ),
+        );
       }
     });
     socket.on("error", () => {
@@ -131,8 +203,14 @@ export class ClientServer extends EventEmitter {
     });
     socket.on("close", () => {
       this.connections.delete(connection);
-      if (connection.sessionId) {
-        this.options.sessions.disconnect(connection.sessionId);
+      if (
+        connection.sessionId &&
+        this.options.sessions.disconnect(
+          connection.sessionId,
+          connection.connectionId,
+        )
+      ) {
+        this.trace("session_detached", connection);
         this.emit("disconnect", connection.sessionId);
       }
     });
@@ -140,6 +218,9 @@ export class ClientServer extends EventEmitter {
 
   private authenticate(connection: ClientConnection, value: unknown): void {
     const hello = value as Partial<ClientHello>;
+    connection.recovery =
+      Array.isArray(hello?.capabilities) &&
+      hello.capabilities.includes(SESSION_RECOVERY_CAPABILITY);
     if (
       hello.kind !== "client.hello" ||
       hello.protocolVersion !== PROTOCOL_VERSION ||
@@ -147,19 +228,34 @@ export class ClientServer extends EventEmitter {
       typeof hello.authToken !== "string" ||
       !tokensEqual(hello.authToken, this.options.authToken)
     ) {
-      connection.socket.destroy();
+      this.reject(
+        connection,
+        createProtocolError(
+          hello.protocolVersion !== PROTOCOL_VERSION
+            ? "protocol_version_mismatch"
+            : "authentication_failed",
+          "handshake",
+          "客户端握手认证失败",
+          { retryable: false },
+        ),
+      );
       return;
     }
 
+    this.options.cleanup();
     let session =
       hello.resumeSessionId && hello.resumeClientId
         ? this.options.sessions.resume(
             hello.resumeSessionId,
             hello.resumeClientId,
+            connection.connectionId,
           )
         : null;
     if (!session) {
-      session = this.options.sessions.create(randomUUID());
+      session = this.options.sessions.create(
+        randomUUID(),
+        connection.connectionId,
+      );
     }
     connection.clientId = session.clientId;
     connection.sessionId = session.sessionId;
@@ -171,8 +267,28 @@ export class ClientServer extends EventEmitter {
       resumed: Boolean(
         hello.resumeSessionId && hello.resumeSessionId === session.sessionId,
       ),
+      capabilities: [SESSION_RECOVERY_CAPABILITY],
+      brokerInstanceId: this.options.brokerInstanceId,
     });
     this.emit("connect", connection);
+    this.trace("session_connected", connection);
+  }
+
+  private trace(
+    event: string,
+    connection: ClientConnection,
+    code?: string,
+  ): void {
+    process.stderr.write(
+      JSON.stringify({
+        event,
+        at: new Date().toISOString(),
+        brokerInstanceId: this.options.brokerInstanceId,
+        connectionId: connection.connectionId,
+        sessionId: connection.sessionId,
+        code,
+      }) + "\n",
+    );
   }
 }
 

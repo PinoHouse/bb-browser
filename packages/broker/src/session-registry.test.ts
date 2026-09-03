@@ -2,6 +2,32 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { SessionRegistry } from "./session-registry.js";
 
+test("connected sessions survive 30 minutes idle and new admission", () => {
+  const registry = new SessionRegistry({ recoveryWindowMs: 120_000 });
+  const session = registry.create("client-a");
+  session.lastSeenAt -= 30 * 60_000;
+  registry.create("client-b");
+  assert.equal(registry.require(session.sessionId), session);
+});
+
+test("an obsolete connection cannot detach its replacement", () => {
+  const registry = new SessionRegistry({ recoveryWindowMs: 120_000 });
+  const session = registry.create("client-a", "old");
+  registry.disconnect(session.sessionId, "old");
+  assert.equal(registry.resume(session.sessionId, "client-a", "new"), session);
+  assert.equal(registry.disconnect(session.sessionId, "old"), false);
+  assert.equal(session.connected, true);
+});
+
+test("detached expiry starts at disconnect, not the last business request", () => {
+  const registry = new SessionRegistry({ recoveryWindowMs: 120_000 });
+  const session = registry.create("client-a");
+  session.lastSeenAt -= 30 * 60_000;
+  registry.disconnect(session.sessionId);
+  assert.deepEqual(registry.expire(session.lastSeenAt + 119_999), []);
+  assert.deepEqual(registry.expire(session.lastSeenAt + 120_000), [session]);
+});
+
 test("closeOwnedTabs returns only tabs created by the session", () => {
   const registry = new SessionRegistry({ recoveryWindowMs: 30_000 });
   const first = registry.create("client-a");

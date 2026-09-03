@@ -26,6 +26,7 @@ async function connectClient(transport: FakeTransport): Promise<BrowserClient> {
     clientId: "client-1",
     sessionId: "session-1",
     resumed: false,
+    capabilities: ["session-recovery-v1"],
   });
   return clientPromise;
 }
@@ -44,6 +45,7 @@ test("command uses session identity and resolves matching response", async () =>
     clientId: "client-1",
     sessionId: "session-1",
     resumed: false,
+    capabilities: ["session-recovery-v1"],
   });
   const client = await clientPromise;
   const resultPromise = client.command(

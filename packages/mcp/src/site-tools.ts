@@ -5,25 +5,28 @@ import {
   textResult,
   toolErrorResult,
   type McpToolResult,
+  withToolCancellation,
+  currentToolSignal,
 } from "./tool-result.js";
 
 export interface SiteToolService {
   list(): unknown[];
   search(query: string): unknown[];
   info(name: string): unknown;
-  recommend(days?: number): Promise<unknown>;
+  recommend(days?: number, signal?: AbortSignal): Promise<unknown>;
   run(input: {
     name: string;
     args?: string[];
     namedArgs?: Record<string, string>;
     tabId?: number;
     timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<unknown>;
   update(): Promise<unknown>;
 }
 
 export function createSiteToolHandlers(service: SiteToolService) {
-  return {
+  return withToolCancellation({
     site_list: (_input: Record<string, never>) =>
       capture("site_list", async () =>
         textResult(service.list().map(publicSiteMeta)),
@@ -41,7 +44,7 @@ export function createSiteToolHandlers(service: SiteToolService) {
 
     site_recommend: (input: { days?: number }) =>
       capture("site_recommend", async () =>
-        textResult(await service.recommend(input.days)),
+        textResult(await service.recommend(input.days, currentToolSignal())),
       ),
 
     site_run: (input: {
@@ -59,13 +62,14 @@ export function createSiteToolHandlers(service: SiteToolService) {
             namedArgs: input.namedArgs,
             tabId: input.tab,
             timeoutMs: input.timeoutMs,
+            ...(currentToolSignal() ? { signal: currentToolSignal() } : {}),
           }),
         ),
       ),
 
     site_update: (_input: Record<string, never>) =>
       capture("site_update", async () => textResult(await service.update())),
-  };
+  });
 }
 
 export function registerSiteTools(
@@ -136,11 +140,7 @@ export function registerSiteTools(
 }
 
 function publicSiteMeta(value: unknown): unknown {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("filePath" in value)
-  ) {
+  if (typeof value !== "object" || value === null || !("filePath" in value)) {
     return value;
   }
   const { filePath: _filePath, ...meta } = value as SiteMeta;

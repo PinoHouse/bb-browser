@@ -8,6 +8,7 @@ import {
 } from "@bb-browser/shared";
 import { createBrowserToolHandlers } from "./browser-tools.js";
 import { createSiteToolHandlers } from "./site-tools.js";
+import { BrowserClient } from "@bb-browser/client";
 
 class FakeBrowserClient {
   calls: Array<{
@@ -119,7 +120,9 @@ test("protocol errors keep every structured field", async () => {
   );
   const result = await createBrowserToolHandlers(client).browser_snapshot({});
   assert.equal(result.isError, true);
-  const parsed = JSON.parse(result.content[0].type === "text" ? result.content[0].text : "{}");
+  const parsed = JSON.parse(
+    result.content[0].type === "text" ? result.content[0].text : "{}",
+  );
   assert.deepEqual(Object.keys(parsed).sort(), [
     "action",
     "code",
@@ -128,4 +131,41 @@ test("protocol errors keep every structured field", async () => {
     "phase",
     "retryable",
   ]);
+});
+
+test("MCP cancellation prevents a browser command from reconnecting or dispatching", async () => {
+  let connects = 0;
+  const client = BrowserClient.create({
+    clientName: "test",
+    authToken: "test",
+    transportFactory: async () => {
+      connects++;
+      throw createProtocolError("authentication_failed", "connect", "test");
+    },
+  });
+  const controller = new AbortController();
+  controller.abort();
+  const result = await createBrowserToolHandlers(client).browser_click(
+    { tab: 1, ref: "e1" },
+    { signal: controller.signal },
+  );
+  assert.equal(result.isError, true);
+  assert.equal(
+    JSON.parse((result.content[0] as { text: string }).text).code,
+    "request_cancelled",
+  );
+  assert.equal(connects, 0);
+  client.close();
+});
+
+test("MCP cancellation prevents a site adapter from starting", async () => {
+  const service = new FakeSiteService();
+  const controller = new AbortController();
+  controller.abort();
+  const result = await createSiteToolHandlers(service).site_run(
+    { name: "twitter/radar" },
+    { signal: controller.signal },
+  );
+  assert.equal(result.isError, true);
+  assert.equal(service.runCalls.length, 0);
 });

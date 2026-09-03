@@ -67,7 +67,8 @@ export class RequestRouter {
       return;
     }
     if (message.sessionId !== connectionSessionId) {
-      const requestId = "requestId" in message ? message.requestId : randomUUID();
+      const requestId =
+        "requestId" in message ? message.requestId : randomUUID();
       this.safeSend(
         send,
         this.errorResponse(
@@ -127,6 +128,10 @@ export class RequestRouter {
       return;
     }
     this.pendingExtension.delete(message.requestId);
+    if (pending.job.overrideError) {
+      pending.reject(pending.job.overrideError);
+      return;
+    }
     const now = Date.now();
     const timing = {
       queuedMs:
@@ -192,6 +197,27 @@ export class RequestRouter {
     }
   }
 
+  shutdown(): void {
+    this.handleExtensionDisconnect();
+    for (const job of [...this.jobs.values()]) {
+      this.completeJob(
+        job,
+        this.errorResponse(
+          job.request.requestId,
+          job.request.sessionId,
+          job.overrideError ??
+            createProtocolError(
+              "broker_unavailable",
+              "cleanup",
+              "bb-browser Broker 正在关闭",
+              { retryable: false },
+            ),
+          job,
+        ),
+      );
+    }
+  }
+
   get pendingCount(): number {
     return this.jobs.size;
   }
@@ -249,12 +275,9 @@ export class RequestRouter {
     );
     const resourceKey = this.resourceKey(request);
     void this.options.scheduler
-      .run(
-        request.sessionId,
-        resourceKey,
-        () => this.dispatch(job),
-        { requestId: request.requestId },
-      )
+      .run(request.sessionId, resourceKey, () => this.dispatch(job), {
+        requestId: request.requestId,
+      })
       .then(
         (response) => this.completeJob(job, response),
         (error) => {
@@ -277,12 +300,10 @@ export class RequestRouter {
     if (job.completed) {
       return Promise.reject(
         job.overrideError ??
-          createProtocolError(
-            "request_cancelled",
-            "queue",
-            "请求已取消",
-            { retryable: false, action: job.request.action },
-          ),
+          createProtocolError("request_cancelled", "queue", "请求已取消", {
+            retryable: false,
+            action: job.request.action,
+          }),
       );
     }
     try {
@@ -411,13 +432,13 @@ export class RequestRouter {
     }
     const pending = this.pendingExtension.get(job.request.requestId);
     if (pending) {
-      this.pendingExtension.delete(job.request.requestId);
       try {
         this.options.extension.send(message);
       } catch {
         // The cancellation result remains authoritative.
       }
-      pending.reject(error);
+      // Keep the resource occupied until the extension acknowledges cancellation
+      // (with a response), disconnects, or the original deadline elapses.
       return;
     }
     this.completeJob(
@@ -598,14 +619,8 @@ export class RequestRouter {
     }
     const referencedTabId = this.numericTabId(request.tabId) ?? responseTabId;
     if (referencedTabId !== undefined) {
-      this.options.sessions.recordReference(
-        request.sessionId,
-        referencedTabId,
-      );
-      this.options.sessions.setDefaultTab(
-        request.sessionId,
-        referencedTabId,
-      );
+      this.options.sessions.recordReference(request.sessionId, referencedTabId);
+      this.options.sessions.setDefaultTab(request.sessionId, referencedTabId);
     }
   }
 
@@ -704,9 +719,7 @@ export class RequestRouter {
       success: false,
       error,
       timing: {
-        queuedMs: job
-          ? (job.dispatchedAt ?? now) - job.queuedAt
-          : 0,
+        queuedMs: job ? (job.dispatchedAt ?? now) - job.queuedAt : 0,
         executionMs: job?.dispatchedAt
           ? Math.max(0, now - job.dispatchedAt)
           : 0,

@@ -1,10 +1,49 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import {
-  createProtocolError,
-  type ProtocolError,
-} from "@bb-browser/shared";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createProtocolError, type ProtocolError } from "@bb-browser/shared";
 
 export type McpToolResult = CallToolResult;
+
+const toolCancellation = new AsyncLocalStorage<AbortSignal | undefined>();
+export const currentToolSignal = () => toolCancellation.getStore();
+
+/** Preserve the SDK cancellation signal independently for concurrent tool calls. */
+export function withToolCancellation<
+  T extends Record<string, (input: never) => Promise<McpToolResult>>,
+>(
+  handlers: T,
+): {
+  [K in keyof T]: (
+    input: Parameters<T[K]>[0],
+    extra?: { signal?: AbortSignal },
+  ) => Promise<McpToolResult>;
+} {
+  return Object.fromEntries(
+    Object.entries(handlers).map(([name, handler]) => [
+      name,
+      (input: never, extra?: { signal?: AbortSignal }) =>
+        toolCancellation.run(extra?.signal, () => {
+          if (extra?.signal?.aborted)
+            return Promise.resolve(
+              protocolErrorResult(
+                createProtocolError(
+                  "request_cancelled",
+                  "dispatch",
+                  "MCP 操作已取消",
+                  { retryable: false, action: name },
+                ),
+              ),
+            );
+          return handler(input);
+        }),
+    ]),
+  ) as {
+    [K in keyof T]: (
+      input: Parameters<T[K]>[0],
+      extra?: { signal?: AbortSignal },
+    ) => Promise<McpToolResult>;
+  };
+}
 
 export function textResult(value: unknown): McpToolResult {
   const text =

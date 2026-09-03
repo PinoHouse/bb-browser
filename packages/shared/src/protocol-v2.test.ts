@@ -26,3 +26,9 @@ test("only undispatched idempotent operations are automatically retryable", () =
   assert.equal(isRetryableBeforeDispatch("safe_write"), true);
   assert.equal(isRetryableBeforeDispatch("unsafe_write"), false);
 });
+
+test("session reset explains lost context and cannot authorize a blind retry", () => {
+  const error = createProtocolError("session_reset", "connect", "Session changed");
+  assert.equal(error.retryable, false);
+  assert.match(error.hint, /重新确认.*标签/);
+});
