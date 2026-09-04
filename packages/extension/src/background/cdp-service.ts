@@ -198,6 +198,25 @@ const networkRoutes = new Map<number, NetworkRoute[]>();
 const networkEnabledTabs = new Set<number>();
 const networkBodyBytes = new Map<number, number>();
 
+/** Tabs with Fetch interception active (only while at least one route exists). */
+const interceptingTabs = new Set<number>();
+
+/** Tabs with console/error capture enabled; they must stay attached to keep collecting. */
+const consoleEnabledTabs = new Set<number>();
+
+/** In-flight debugger.attach per tab, so concurrent first commands share one attach. */
+const attachInFlight = new Map<number, Promise<void>>();
+
+/** Idle detach timers per tab. */
+const idleDetachTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+/**
+ * A tab that has received no CDP command for this long is detached, which
+ * removes Chrome's "is debugging this tab" banner. The next command re-attaches
+ * transparently; backendDOMNodeId refs survive a detach/attach cycle.
+ */
+const IDLE_DETACH_MS = 60_000;
+
 const MAX_REQUESTS = 500;
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 256 * 1024;
@@ -213,10 +232,18 @@ const MAX_ERRORS = 100;
  * 确保 debugger 已附加到指定 tab
  */
 export async function ensureAttached(tabId: number): Promise<void> {
-  if (attachedTabs.has(tabId)) {
-    return;
+  if (!attachedTabs.has(tabId)) {
+    let inFlight = attachInFlight.get(tabId);
+    if (!inFlight) {
+      inFlight = attachTab(tabId).finally(() => attachInFlight.delete(tabId));
+      attachInFlight.set(tabId, inFlight);
+    }
+    await inFlight;
   }
+  touchTab(tabId);
+}
 
+async function attachTab(tabId: number): Promise<void> {
   try {
     await chrome.debugger.attach({ tabId }, '1.3');
     attachedTabs.add(tabId);
@@ -238,10 +265,43 @@ export async function ensureAttached(tabId: number): Promise<void> {
   }
 }
 
+/** Reset the idle-detach timer; monitored tabs never detach on idle. */
+function touchTab(tabId: number): void {
+  const existing = idleDetachTimers.get(tabId);
+  if (existing) {
+    clearTimeout(existing);
+    idleDetachTimers.delete(tabId);
+  }
+  if (mustStayAttached(tabId)) {
+    return;
+  }
+  const timer = setTimeout(() => {
+    idleDetachTimers.delete(tabId);
+    if (mustStayAttached(tabId)) {
+      return;
+    }
+    void detach(tabId);
+  }, IDLE_DETACH_MS);
+  idleDetachTimers.set(tabId, timer);
+}
+
+function mustStayAttached(tabId: number): boolean {
+  return (
+    networkEnabledTabs.has(tabId) ||
+    consoleEnabledTabs.has(tabId) ||
+    pendingDialogs.has(tabId)
+  );
+}
+
 /**
  * 从 tab 分离 debugger
  */
 export async function detach(tabId: number): Promise<void> {
+  const timer = idleDetachTimers.get(tabId);
+  if (timer) {
+    clearTimeout(timer);
+    idleDetachTimers.delete(tabId);
+  }
   if (!attachedTabs.has(tabId)) {
     return;
   }
@@ -403,6 +463,38 @@ export async function resolveNodeByBackendId(
     backendNodeId,
   });
   return result.object.objectId;
+}
+
+/**
+ * Describe a DOM node. For an iframe/frame owner element, `node.frameId` is the
+ * CDP frame id of the document it hosts.
+ */
+export async function describeNode(
+  tabId: number,
+  options: { nodeId?: number; backendNodeId?: number },
+): Promise<DOMNode> {
+  const result = await sendCommand<{ node: DOMNode }>(tabId, 'DOM.describeNode', options);
+  return result.node;
+}
+
+/**
+ * Content quads of a node in top-level (main frame) viewport CSS pixels. Unlike
+ * getBoundingClientRect these already include any enclosing iframe offset, so
+ * they give correct Input coordinates for elements inside frames. Returns an
+ * empty array for nodes with no rendered box (display:none, detached).
+ */
+export async function getContentQuads(
+  tabId: number,
+  backendNodeId: number,
+): Promise<number[][]> {
+  try {
+    const result = await sendCommand<{ quads: number[][] }>(tabId, 'DOM.getContentQuads', {
+      backendNodeId,
+    });
+    return result.quads ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -723,10 +815,10 @@ export async function enableNetwork(tabId: number): Promise<void> {
   if (networkEnabledTabs.has(tabId)) return;
   
   await ensureAttached(tabId);
+  // Passive observation only. Fetch interception pauses every request until
+  // the service worker answers, so it is enabled separately and only while a
+  // route exists (see enableInterception).
   await sendCommand(tabId, 'Network.enable');
-  await sendCommand(tabId, 'Fetch.enable', {
-    patterns: [{ urlPattern: '*' }],
-  });
   
   networkEnabledTabs.add(tabId);
   if (!networkRequests.has(tabId)) {
@@ -745,16 +837,54 @@ export async function enableNetwork(tabId: number): Promise<void> {
 export async function disableNetwork(tabId: number): Promise<void> {
   if (!networkEnabledTabs.has(tabId)) return;
   
+  await disableInterception(tabId);
   try {
-    await sendCommand(tabId, 'Fetch.disable');
     await sendCommand(tabId, 'Network.disable');
-  } catch (e) {
+  } catch {
     // 忽略错误
   }
   
   networkEnabledTabs.delete(tabId);
   networkBodyBytes.delete(tabId);
   console.log('[CDPService] Network disabled for tab:', tabId);
+}
+
+/** Start pausing requests for route handling. Only needed while routes exist. */
+async function enableInterception(tabId: number): Promise<void> {
+  if (interceptingTabs.has(tabId)) return;
+  await sendCommand(tabId, 'Fetch.enable', {
+    patterns: [{ urlPattern: '*' }],
+  });
+  interceptingTabs.add(tabId);
+  console.log('[CDPService] Fetch interception enabled for tab:', tabId);
+}
+
+async function disableInterception(tabId: number): Promise<void> {
+  if (!interceptingTabs.has(tabId)) return;
+  interceptingTabs.delete(tabId);
+  try {
+    await sendCommand(tabId, 'Fetch.disable');
+  } catch {
+    // The tab may already be gone.
+  }
+  console.log('[CDPService] Fetch interception disabled for tab:', tabId);
+}
+
+/**
+ * Match a route pattern against a URL. `*` is the only wildcard; every other
+ * character is literal, so patterns such as "api.example.com/v1?x=1" work.
+ */
+export function matchesRoutePattern(pattern: string, url: string): boolean {
+  if (pattern === '*') return true;
+  if (pattern.includes('*')) {
+    const source = pattern.split('*').map(escapeRegExp).join('.*');
+    return new RegExp(source).test(url);
+  }
+  return url.includes(pattern);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -803,6 +933,7 @@ export async function addNetworkRoute(
   options: { abort?: boolean; body?: string; status?: number; headers?: Record<string, string> } = {}
 ): Promise<void> {
   await enableNetwork(tabId);
+  await enableInterception(tabId);
   
   const route: NetworkRoute = {
     urlPattern,
@@ -824,7 +955,7 @@ export async function addNetworkRoute(
 /**
  * 移除网络拦截规则
  */
-export function removeNetworkRoute(tabId: number, urlPattern?: string): void {
+export async function removeNetworkRoute(tabId: number, urlPattern?: string): Promise<void> {
   if (!urlPattern) {
     networkRoutes.delete(tabId);
     console.log('[CDPService] Removed all network routes for tab:', tabId);
@@ -832,6 +963,9 @@ export function removeNetworkRoute(tabId: number, urlPattern?: string): void {
     const routes = networkRoutes.get(tabId) || [];
     networkRoutes.set(tabId, routes.filter(r => r.urlPattern !== urlPattern));
     console.log('[CDPService] Removed network route:', urlPattern);
+  }
+  if (getNetworkRoutes(tabId).length === 0) {
+    await disableInterception(tabId);
   }
 }
 
@@ -853,6 +987,7 @@ export async function enableConsole(tabId: number): Promise<void> {
   await ensureAttached(tabId);
   await sendCommand(tabId, 'Runtime.enable');
   await sendCommand(tabId, 'Log.enable');
+  consoleEnabledTabs.add(tabId);
   
   if (!consoleMessages.has(tabId)) {
     consoleMessages.set(tabId, []);
@@ -962,11 +1097,19 @@ export function initEventListeners(): void {
  * 清理 tab 相关状态
  */
 function cleanupTab(tabId: number): void {
+  const timer = idleDetachTimers.get(tabId);
+  if (timer) {
+    clearTimeout(timer);
+    idleDetachTimers.delete(tabId);
+  }
+  attachInFlight.delete(tabId);
   attachedTabs.delete(tabId);
   pendingDialogs.delete(tabId);
   networkRequests.delete(tabId);
   networkRoutes.delete(tabId);
   networkEnabledTabs.delete(tabId);
+  interceptingTabs.delete(tabId);
+  consoleEnabledTabs.delete(tabId);
   networkBodyBytes.delete(tabId);
   consoleMessages.delete(tabId);
   jsErrors.delete(tabId);
@@ -1160,14 +1303,7 @@ async function handleFetchPaused(tabId: number, params: FetchPausedParams): Prom
   const url = params.request.url;
   
   // 查找匹配的规则
-  const matchedRoute = routes.find(route => {
-    if (route.urlPattern === '*') return true;
-    if (route.urlPattern.includes('*')) {
-      const regex = new RegExp(route.urlPattern.replace(/\*/g, '.*'));
-      return regex.test(url);
-    }
-    return url.includes(route.urlPattern);
-  });
+  const matchedRoute = routes.find(route => matchesRoutePattern(route.urlPattern, url));
   
   try {
     if (matchedRoute) {

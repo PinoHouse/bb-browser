@@ -4,7 +4,7 @@ import {
   readdirSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 export interface SiteArgDefinition {
   required?: boolean;
@@ -84,6 +84,29 @@ export class SiteRegistry {
     return readFileSync(site.filePath, "utf8");
   }
 
+  /**
+   * Shared helpers live in `_helper.js` next to the adapter and are prepended
+   * to its evaluation scope. A local override that ships no helper of its own
+   * falls back to the community helper for the same platform directory, so
+   * overriding one adapter never silently drops the shared code.
+   */
+  readHelper(site: SiteMeta): string | null {
+    const adapterDir = dirname(site.filePath);
+    const candidates = [join(adapterDir, "_helper.js")];
+    if (site.source === "local") {
+      const platformDir = relative(this.localDir, adapterDir);
+      if (platformDir && !platformDir.startsWith("..")) {
+        candidates.push(join(this.communityDir, platformDir, "_helper.js"));
+      }
+    }
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        return readFileSync(candidate, "utf8");
+      }
+    }
+    return null;
+  }
+
   get diagnostics(): readonly SiteDiagnostic[] {
     return this.diagnosticList;
   }
@@ -113,7 +136,12 @@ export class SiteRegistry {
         const filePath = join(directory, entry.name);
         if (entry.isDirectory() && !entry.name.startsWith(".")) {
           walk(filePath);
-        } else if (entry.isFile() && entry.name.endsWith(".js")) {
+        } else if (
+          entry.isFile() &&
+          entry.name.endsWith(".js") &&
+          // `_helper.js` and other underscore files are shared code, not adapters.
+          !entry.name.startsWith("_")
+        ) {
           const site = this.parse(filePath, root, source);
           if (site) {
             sites.push(site);

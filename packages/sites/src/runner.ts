@@ -78,7 +78,9 @@ export class SiteRunner {
     this.checkGeneration(generation);
     const source = this.options.registry.readSource(site);
     const body = source.replace(/\/\*\s*@meta[\s\S]*?\*\//, "").trim();
+    const helper = this.options.registry.readHelper(site);
     const script =
+      (helper ? `${helper}\n` : "") +
       `const __bb_fn = ${body};\n` +
       `const __bb_r = await __bb_fn(${JSON.stringify(args)});\n` +
       "JSON.stringify(__bb_r);";

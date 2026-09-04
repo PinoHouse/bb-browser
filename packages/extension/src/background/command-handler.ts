@@ -16,13 +16,6 @@ import * as traceService from './trace-service';
 cdp.initEventListeners();
 
 /**
- * 每个 tab 的活动 Frame 的 frameId
- * null 表示主 frame，数字表示子 frame 的 frameId
- * 用于 handleFrame 内部逻辑，DOM 操作使用 dom-service 的 activeFrameId
- */
-const tabActiveFrameId = new Map<number, number | null>();
-
-/**
  * 根据命令解析目标 tab
  * 如果 command.tabId 是 number，用它直接获取 tab
  * 否则 fallback 到当前活跃 tab
@@ -73,7 +66,7 @@ export async function handleCommand(
         break;
 
       case 'type':
-        result = await handleType(command);
+        result = await handleType(command, signal);
         break;
 
       case 'check':
@@ -500,7 +493,10 @@ async function handleFill(command: ExtensionCommand): Promise<CommandResult> {
  * 处理 type 命令 - 逐字符输入文本（不清空原有内容）
  * v2.0: 使用 CDP Input.dispatchKeyEvent
  */
-async function handleType(command: ExtensionCommand): Promise<CommandResult> {
+async function handleType(
+  command: ExtensionCommand,
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   const ref = command.ref as string;
   const text = command.text as string;
 
@@ -535,7 +531,7 @@ async function handleType(command: ExtensionCommand): Promise<CommandResult> {
 
   try {
     // v2.0: 使用 CDP DOM Service
-    const elementInfo = await cdpDom.typeElement(activeTab.id, ref, text);
+    const elementInfo = await cdpDom.typeElement(activeTab.id, ref, text, signal);
 
     return {
       id: command.id,
@@ -745,7 +741,6 @@ async function handleClose(command: ExtensionCommand): Promise<CommandResult> {
     // 清理 tab 相关状态
     cleanupDomTab(tabId);
     cleanupCdpTab(tabId);
-    tabActiveFrameId.delete(tabId);
 
     return {
       id: command.id,
@@ -848,30 +843,49 @@ async function handleGet(command: ExtensionCommand): Promise<CommandResult> {
  * 处理 screenshot 命令 - 截取当前页面
  */
 async function handleScreenshot(command: ExtensionCommand): Promise<CommandResult> {
-  // 获取目标标签页
-  const activeTab = await resolveTab(command);
+  const tab = await resolveTab(command);
 
-  if (!activeTab.id || !activeTab.windowId) {
+  if (!tab.id || tab.windowId === undefined) {
     return {
       id: command.id,
       success: false,
       error: 'No active tab found',
     };
   }
+  const tabId = tab.id;
+  const windowId = tab.windowId;
 
-  console.log('[CommandHandler] Taking screenshot of tab:', activeTab.id, activeTab.url);
+  console.log('[CommandHandler] Taking screenshot of tab:', tabId, tab.url);
+
+  // Chrome does not paint background tabs, so capturing a hidden tab can stall
+  // or return stale pixels. Bring the target forward for the capture and put
+  // the previously active tab back afterwards.
+  let previousActiveTabId: number | undefined;
+  if (!tab.active) {
+    const [previous] = await chrome.tabs.query({ active: true, windowId });
+    previousActiveTabId = previous?.id;
+    await chrome.tabs.update(tabId, { active: true });
+  }
 
   try {
-    // 使用 chrome.tabs.captureVisibleTab 截图
-    const dataUrl = await chrome.tabs.captureVisibleTab(activeTab.windowId, { format: 'png' });
+    let dataUrl: string;
+    try {
+      dataUrl = `data:image/png;base64,${await cdp.captureScreenshot(tabId)}`;
+    } catch (cdpError) {
+      // Restricted pages (chrome://, the PDF viewer) refuse debugger attach. The
+      // target tab is active now, so the visible-tab capture shows the right page.
+      console.warn('[CommandHandler] CDP screenshot failed, using captureVisibleTab:', cdpError);
+      dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+    }
 
     return {
       id: command.id,
       success: true,
       data: {
         dataUrl,
-        title: activeTab.title || '',
-        url: activeTab.url || '',
+        tabId,
+        title: tab.title || '',
+        url: tab.url || '',
       },
     };
   } catch (error) {
@@ -881,6 +895,14 @@ async function handleScreenshot(command: ExtensionCommand): Promise<CommandResul
       success: false,
       error: `Screenshot failed: ${error instanceof Error ? error.message : String(error)}`,
     };
+  } finally {
+    if (previousActiveTabId !== undefined && previousActiveTabId !== tabId) {
+      try {
+        await chrome.tabs.update(previousActiveTabId, { active: true });
+      } catch {
+        // The previous tab may have been closed meanwhile.
+      }
+    }
   }
 }
 
@@ -938,7 +960,7 @@ async function handleWait(
 
     try {
       // v2.0: 使用 CDP DOM Service
-      await raceWithAbort(cdpDom.waitForElement(activeTab.id, ref), signal);
+      await cdpDom.waitForElement(activeTab.id, ref, undefined, undefined, signal);
       return {
         id: command.id,
         success: true,
@@ -1496,7 +1518,6 @@ async function handleTabClose(command: ExtensionCommand): Promise<CommandResult>
     // 清理 tab 相关状态
     cleanupDomTab(tabId);
     cleanupCdpTab(tabId);
-    tabActiveFrameId.delete(tabId);
 
     return {
       id: command.id,
@@ -1524,156 +1545,59 @@ async function handleFrame(command: ExtensionCommand): Promise<CommandResult> {
   const selector = command.selector as string;
 
   if (!selector) {
-    return {
-      id: command.id,
-      success: false,
-      error: 'Missing selector parameter',
-    };
+    return { id: command.id, success: false, error: 'Missing selector parameter' };
   }
 
-  // 获取目标标签页
   const activeTab = await resolveTab(command);
-
   if (!activeTab.id) {
-    return {
-      id: command.id,
-      success: false,
-      error: 'No active tab found',
-    };
+    return { id: command.id, success: false, error: 'No active tab found' };
   }
-
   const tabId = activeTab.id;
 
   console.log('[CommandHandler] Switching to frame:', selector);
 
   try {
-    // 1. 在页面中找到 iframe 元素并获取其信息
-    const iframeInfoResults = await chrome.scripting.executeScript({
-      target: { tabId, frameIds: tabActiveFrameId.get(tabId) !== null && tabActiveFrameId.get(tabId) !== undefined ? [tabActiveFrameId.get(tabId)!] : [0] },
-      func: (sel: string) => {
-        const iframe = document.querySelector(sel) as HTMLIFrameElement | null;
-        if (!iframe) {
-          return { found: false, error: `找不到 iframe: ${sel}` };
-        }
-        if (iframe.tagName.toLowerCase() !== 'iframe' && iframe.tagName.toLowerCase() !== 'frame') {
-          return { found: false, error: `元素不是 iframe: ${iframe.tagName}` };
-        }
-        return {
-          found: true,
-          name: iframe.name || '',
-          src: iframe.src || '',
-          // 获取 iframe 在页面中的位置用于匹配
-          rect: iframe.getBoundingClientRect(),
-        };
-      },
-      args: [selector],
-    });
-
-    const iframeInfo = iframeInfoResults[0]?.result as {
-      found: boolean;
-      error?: string;
-      name?: string;
-      src?: string;
-      rect?: DOMRect;
-    };
-
-    if (!iframeInfo || !iframeInfo.found) {
+    // Resolve the selector to an iframe element node, then read the CDP frame id
+    // of the document it hosts. Uses the debugger DOM domain only — no
+    // webNavigation/scripting, and it works for cross-origin frames.
+    const doc = await cdp.getDocument(tabId, { depth: 0 });
+    const nodeId = await cdp.querySelector(tabId, doc.nodeId, selector);
+    if (!nodeId) {
+      return { id: command.id, success: false, error: `找不到 iframe: ${selector}` };
+    }
+    const node = await cdp.describeNode(tabId, { nodeId });
+    const tag = (node.localName || node.nodeName || '').toLowerCase();
+    if (tag !== 'iframe' && tag !== 'frame') {
+      return { id: command.id, success: false, error: `元素不是 iframe: ${node.nodeName}` };
+    }
+    if (!node.frameId) {
       return {
         id: command.id,
         success: false,
-        error: iframeInfo?.error || `找不到 iframe: ${selector}`,
+        error: `无法获取 iframe 的 frameId: ${selector}`,
       };
     }
 
-    // 2. 获取所有 frames
-    const frames = await chrome.webNavigation.getAllFrames({ tabId });
-
-    if (!frames || frames.length === 0) {
-      return {
-        id: command.id,
-        success: false,
-        error: '无法获取页面 frames',
-      };
-    }
-
-    // 3. 尝试通过 URL 或 name 匹配 frameId
-    let targetFrameId: number | null = null;
-
-    // 首先尝试通过 src URL 匹配
-    if (iframeInfo.src) {
-      const matchedFrame = frames.find(f => 
-        f.url === iframeInfo.src || 
-        f.url.includes(iframeInfo.src!) ||
-        iframeInfo.src!.includes(f.url)
-      );
-      if (matchedFrame) {
-        targetFrameId = matchedFrame.frameId;
-      }
-    }
-
-    // 如果没有匹配到，尝试通过非主 frame 排除
-    if (targetFrameId === null) {
-      // 获取非主 frame 的列表（排除 frameId 为 0 的主 frame）
-      const childFrames = frames.filter(f => f.frameId !== 0);
-      
-      if (childFrames.length === 1) {
-        // 只有一个子 frame，直接使用它
-        targetFrameId = childFrames[0].frameId;
-      } else if (childFrames.length > 1) {
-        // 多个子 frame，尝试用 name 匹配
-        if (iframeInfo.name) {
-          // 目前无法直接通过 name 匹配，需要更复杂的逻辑
-          // 暂时使用第一个匹配 URL 的 frame
-          console.log('[CommandHandler] Multiple frames found, using URL matching');
-        }
-        
-        // 如果还是没找到，返回错误
-        if (targetFrameId === null) {
-          return {
-            id: command.id,
-            success: false,
-            error: `找到多个子 frame，无法确定目标。请使用更精确的 selector 或确保 iframe 有 src 属性。`,
-          };
-        }
-      } else {
-        return {
-          id: command.id,
-          success: false,
-          error: '页面中没有子 frame',
-        };
-      }
-    }
-
-    // 4. 验证 frameId 是否有效（尝试在该 frame 中执行脚本）
+    // Confirm the frame is reachable by fetching its accessibility tree once.
     try {
-      await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [targetFrameId] },
-        func: () => true,
-      });
+      await cdp.getFullAccessibilityTree(tabId, { frameId: node.frameId });
     } catch (e) {
       return {
         id: command.id,
         success: false,
-        error: `无法访问 frame (frameId: ${targetFrameId})，可能是跨域 iframe`,
+        error: `无法访问 frame (${node.frameId}): ${e instanceof Error ? e.message : String(e)}`,
       };
     }
 
-    // 5. 保存 activeFrameId 并同步到 cdp-dom-service
-    tabActiveFrameId.set(tabId, targetFrameId);
-    cdpDom.setActiveFrameId(tabId, String(targetFrameId));
-
-    const matchedFrameInfo = frames.find(f => f.frameId === targetFrameId);
+    cdpDom.setActiveFrameId(tabId, node.frameId);
+    const name = extractAttribute(node.attributes, 'name');
+    const src = extractAttribute(node.attributes, 'src');
 
     return {
       id: command.id,
       success: true,
       data: {
-        frameInfo: {
-          selector,
-          name: iframeInfo.name,
-          url: matchedFrameInfo?.url || iframeInfo.src,
-          frameId: targetFrameId,
-        },
+        frameInfo: { selector, name, url: src, frameId: node.frameId },
       },
     };
   } catch (error) {
@@ -1684,6 +1608,15 @@ async function handleFrame(command: ExtensionCommand): Promise<CommandResult> {
       error: `Frame switch failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+/** Read an attribute value from a CDP DOM node's flat [name, value, ...] array. */
+function extractAttribute(attributes: string[] | undefined, name: string): string | undefined {
+  if (!attributes) return undefined;
+  for (let i = 0; i < attributes.length; i += 2) {
+    if (attributes[i] === name) return attributes[i + 1];
+  }
+  return undefined;
 }
 
 /**
@@ -1705,17 +1638,14 @@ async function handleFrameMain(command: ExtensionCommand): Promise<CommandResult
 
   const tabId = activeTab.id;
 
-  // 重置 activeFrameId 并同步到 cdp-dom-service
-  tabActiveFrameId.set(tabId, null);
+  // 回到主 frame：清除活动 frame。
   cdpDom.setActiveFrameId(tabId, null);
 
   return {
     id: command.id,
     success: true,
     data: {
-      frameInfo: {
-        frameId: 0,
-      },
+      frameInfo: { url: activeTab.url },
     },
   };
 }
@@ -1797,6 +1727,14 @@ async function handleDialog(command: ExtensionCommand): Promise<CommandResult> {
 /**
  * 等待标签页加载完成
  */
+/**
+ * A navigation that never emits a `loading` -> `complete` transition (same-URL
+ * navigation, about:blank, an instant cache hit) is treated as finished once
+ * the tab has reported `complete` for this long after the wait started.
+ */
+const LOAD_SETTLE_GRACE_MS = 1500;
+const LOAD_POLL_INTERVAL_MS = 250;
+
 function waitForTabLoad(
   tabId: number,
   timeout = 30000,
@@ -1804,28 +1742,70 @@ function waitForTabLoad(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     throwIfAborted(signal);
+    const startedAt = Date.now();
+    let sawLoading = false;
+    let settled = false;
+
     const cleanup = () => {
+      settled = true;
       clearTimeout(timeoutId);
+      clearInterval(pollId);
       chrome.tabs.onUpdated.removeListener(listener);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
       signal?.removeEventListener('abort', onAbort);
     };
-    const timeoutId = setTimeout(() => {
+    const finish = (settle: () => void) => {
+      if (settled) return;
       cleanup();
-      reject(new Error('Tab load timeout'));
+      settle();
+    };
+
+    const timeoutId = setTimeout(() => {
+      finish(() => reject(new Error('Tab load timeout')));
     }, timeout);
 
     const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
-      if (updatedTabId === tabId && changeInfo.status === 'complete') {
-        cleanup();
-        resolve();
+      if (updatedTabId !== tabId) return;
+      if (changeInfo.status === 'loading') {
+        sawLoading = true;
+      } else if (changeInfo.status === 'complete') {
+        finish(resolve);
+      }
+    };
+    const onRemoved = (removedTabId: number) => {
+      if (removedTabId === tabId) {
+        finish(() => reject(new Error(`Tab ${tabId} was closed while loading`)));
       }
     };
     const onAbort = () => {
-      cleanup();
-      reject(abortError(signal));
+      finish(() => reject(abortError(signal)));
     };
 
+    // The listener only sees transitions that happen after it is registered. A
+    // tab that was already `complete` (or that finishes between the navigation
+    // call and this registration) never emits another `complete`, so poll too.
+    const pollId = setInterval(() => {
+      chrome.tabs.get(tabId).then(
+        (current) => {
+          if (settled) return;
+          if (current.status === 'loading') {
+            sawLoading = true;
+            return;
+          }
+          if (
+            current.status === 'complete' &&
+            !current.pendingUrl &&
+            (sawLoading || Date.now() - startedAt >= LOAD_SETTLE_GRACE_MS)
+          ) {
+            finish(resolve);
+          }
+        },
+        () => finish(() => reject(new Error(`Tab ${tabId} is no longer available`))),
+      );
+    }, LOAD_POLL_INTERVAL_MS);
+
     chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.onRemoved.addListener(onRemoved);
     signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
@@ -1855,33 +1835,6 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
       reject(abortError(signal));
     };
     signal?.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-function raceWithAbort<T>(
-  operation: Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  if (!signal) {
-    return operation;
-  }
-  return new Promise((resolve, reject) => {
-    throwIfAborted(signal);
-    const onAbort = () => {
-      signal.removeEventListener('abort', onAbort);
-      reject(abortError(signal));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    void operation.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener('abort', onAbort);
-        reject(error);
-      },
-    );
   });
 }
 
@@ -1973,7 +1926,7 @@ async function handleNetwork(command: ExtensionCommand): Promise<CommandResult> 
       }
 
       case 'unroute': {
-        cdp.removeNetworkRoute(tabId, urlPattern);
+        await cdp.removeNetworkRoute(tabId, urlPattern);
         const routeCount = cdp.getNetworkRoutes(tabId).length;
 
         return {

@@ -47,6 +47,7 @@ Treat an item-scoped error as global only when a lightweight `browser_tab_list` 
 
 - Inspect: `browser_tab_list`, `browser_snapshot`, `browser_get`, `browser_screenshot`
 - Act: `browser_open`, `browser_click`, `browser_fill`, `browser_type`, `browser_press`, `browser_scroll`, `browser_hover`, `browser_wait`
+- Frames: `browser_frame` (enter an iframe by CSS selector), `browser_frame_main` (return to the top document); re-snapshot after switching
 - Advanced: `browser_eval`, `browser_network`
 - Cleanup: `browser_close`, `browser_close_all`
 - Adapters: `site_list`, `site_search`, `site_info`, `site_recommend`, `site_run`, `site_update`

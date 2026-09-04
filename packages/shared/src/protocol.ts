@@ -261,8 +261,8 @@ export interface ResponseData {
     name?: string;
     /** iframe 的 URL */
     url?: string;
-    /** frame ID */
-    frameId?: number;
+    /** frame ID（CDP frame id 字符串，主 frame 时省略） */
+    frameId?: number | string;
   };
   /** dialog 信息（dialog 命令返回） */
   dialogInfo?: {

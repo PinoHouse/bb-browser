@@ -169,3 +169,24 @@ test("connection recovery consumes the original site workflow deadline", async (
   assert.equal(client.commandCalls.at(-1)?.options.timeoutMs, 100);
   assert.equal(client.leaseCalls[0].timeoutMs, 100);
 });
+
+test("a platform _helper.js is evaluated in the adapter scope before the adapter body", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "bb-runner-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const communityDir = join(root, "community");
+  await mkdir(join(communityDir, "twitter"), { recursive: true });
+  await writeFile(join(communityDir, "twitter", "_helper.js"), "function findGraphQLQueryId(){ return 'q'; }");
+  await writeFile(
+    join(communityDir, "twitter", "search.js"),
+    `/* @meta\n{"name":"twitter/search","description":"","domain":"x.com","args":{},"readOnly":true}\n*/\nasync function(args){return findGraphQLQueryId()}`,
+  );
+  const registry = new SiteRegistry({ localDir: join(root, "local"), communityDir });
+  const client = new FakeBrowserClient({
+    tabs: [{ tabId: 5, url: "https://x.com/home" }],
+    evalResult: JSON.stringify("q"),
+  });
+  await new SiteRunner({ client, registry }).run({ name: "twitter/search" });
+  const script = client.commandCalls.at(-1)?.input.script ?? "";
+  assert.ok(script.startsWith("function findGraphQLQueryId(){ return 'q'; }\n"));
+  assert.ok(script.includes("const __bb_fn = async function(args){return findGraphQLQueryId()}"));
+});

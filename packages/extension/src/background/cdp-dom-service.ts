@@ -87,8 +87,24 @@ async function saveRefsToStorage(tabId: number, refs: Record<string, RefInfo>): 
   }
 }
 
-// Service Worker 启动时恢复 refs
+/** 从 storage 恢复所有 tab 的活动 frame id */
+async function loadFrameIdsFromStorage(): Promise<void> {
+  try {
+    const result = await chrome.storage.session.get('tabActiveFrameId');
+    if (result.tabActiveFrameId) {
+      const stored = result.tabActiveFrameId as Record<string, string | null>;
+      for (const [tabIdStr, frameId] of Object.entries(stored)) {
+        if (frameId) tabActiveFrameId.set(Number(tabIdStr), frameId);
+      }
+    }
+  } catch (e) {
+    console.warn('[CDPDOMService] Failed to load frame ids from storage:', e);
+  }
+}
+
+// Service Worker 启动时恢复 refs 和活动 frame
 loadRefsFromStorage();
+loadFrameIdsFromStorage();
 
 // ============================================================================
 // Snapshot 实现 — CDP Accessibility Tree
@@ -159,7 +175,8 @@ export async function getSnapshot(
       throw new Error(`Selector "${options.selector}" failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   } else {
-    axNodes = await cdp.getFullAccessibilityTree(tabId);
+    const frameId = tabActiveFrameId.get(tabId) ?? undefined;
+    axNodes = await cdp.getFullAccessibilityTree(tabId, frameId ? { frameId } : {});
   }
 
   // 2. 收集 link 节点的 backendDOMNodeId
@@ -215,14 +232,36 @@ async function getElementCenter(
   const objectId = await cdp.resolveNodeByBackendId(tabId, backendNodeId);
   if (!objectId) throw new Error('Failed to resolve node');
 
-  const result = await cdp.callFunctionOn(tabId, objectId, `function() {
+  // Scroll into view first so the element has a rendered box.
+  await cdp.callFunctionOn(tabId, objectId, `function() {
     this.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+  }`);
+
+  // Content quads are in top-level viewport coordinates, so they stay correct
+  // for elements nested inside an iframe. getBoundingClientRect would be
+  // relative to the iframe's own viewport and mis-locate the click.
+  const quads = await cdp.getContentQuads(tabId, backendNodeId);
+  const center = quadCenter(quads[0]);
+  if (center) return center;
+
+  // Fallback (no rendered quad, e.g. zero-size but focusable): main-frame rect.
+  const result = await cdp.callFunctionOn(tabId, objectId, `function() {
     const rect = this.getBoundingClientRect();
     return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   }`);
-
   if (!result || typeof result !== 'object') throw new Error('Failed to get element center');
   return result as { x: number; y: number };
+}
+
+/** Average the 4 corner points of a CDP content quad (8-number array). */
+export function quadCenter(quad?: number[]): { x: number; y: number } | null {
+  if (!quad || quad.length < 8) return null;
+  const xs = [quad[0], quad[2], quad[4], quad[6]];
+  const ys = [quad[1], quad[3], quad[5], quad[7]];
+  return {
+    x: xs.reduce((a, b) => a + b, 0) / 4,
+    y: ys.reduce((a, b) => a + b, 0) / 4,
+  };
 }
 
 /**
@@ -406,6 +445,7 @@ export async function typeElement(
   tabId: number,
   ref: string,
   text: string,
+  signal?: AbortSignal,
 ): Promise<{ role: string; name?: string }> {
   const refInfo = await getRefInfo(tabId, ref);
   if (!refInfo) throw new Error(`Ref "${ref}" not found. Run snapshot first to get available refs.`);
@@ -433,6 +473,7 @@ export async function typeElement(
   }
 
   for (const char of text) {
+    throwIfAborted(signal);
     await cdp.pressKey(tabId, char);
   }
 
@@ -614,6 +655,7 @@ export async function waitForElement(
   ref: string,
   maxWait = 10000,
   interval = 200,
+  signal?: AbortSignal,
 ): Promise<void> {
   const refInfo = await getRefInfo(tabId, ref);
   if (!refInfo) throw new Error(`Ref "${ref}" not found. Run snapshot first to get available refs.`);
@@ -622,6 +664,7 @@ export async function waitForElement(
   let elapsed = 0;
 
   while (elapsed < maxWait) {
+    throwIfAborted(signal);
     try {
       if (backendNodeId !== null) {
         // 尝试 resolve 节点，成功则存在
@@ -640,11 +683,34 @@ export async function waitForElement(
       // 节点不存在，继续等待
     }
 
-    await new Promise(resolve => setTimeout(resolve, interval));
+    await abortableSleep(interval, signal);
     elapsed += interval;
   }
 
   throw new Error(`Timeout waiting for element @${ref} after ${maxWait}ms`);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException('Operation aborted', 'AbortError');
+  }
+}
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    throwIfAborted(signal);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason instanceof Error ? signal.reason : new DOMException('Operation aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 // ============================================================================
@@ -653,6 +719,20 @@ export async function waitForElement(
 
 export function setActiveFrameId(tabId: number, frameId: string | null): void {
   tabActiveFrameId.set(tabId, frameId);
+  void chrome.storage.session
+    .get('tabActiveFrameId')
+    .then((result) => {
+      const stored = (result.tabActiveFrameId || {}) as Record<string, string | null>;
+      if (frameId === null) {
+        delete stored[String(tabId)];
+      } else {
+        stored[String(tabId)] = frameId;
+      }
+      return chrome.storage.session.set({ tabActiveFrameId: stored });
+    })
+    .catch(() => {
+      /* best effort */
+    });
 }
 
 export function getActiveFrameId(tabId: number): string | null {

@@ -285,6 +285,24 @@ export function createBrowserToolHandlers(client: BrowserToolClient) {
         return textResult(response.data?.result ?? response.data ?? {});
       }),
 
+    browser_frame: (input: { selector: string; tab?: number }) =>
+      capture("frame", async () => {
+        const response = await command(
+          { action: "frame", selector: input.selector, tabId: input.tab },
+          { timeoutMs: 60_000, idempotency: "safe_write" },
+        );
+        return textResult(response.data?.frameInfo ?? "Switched frame");
+      }),
+
+    browser_frame_main: (input: { tab?: number }) =>
+      capture("frame_main", async () => {
+        const response = await command(
+          { action: "frame_main", tabId: input.tab },
+          { timeoutMs: 60_000, idempotency: "safe_write" },
+        );
+        return textResult(response.data?.frameInfo ?? "Switched to main frame");
+      }),
+
     browser_hover: (input: { ref: string; tab?: number }) =>
       capture("hover", async () => {
         const response = await command(
@@ -461,6 +479,23 @@ export function registerBrowserTools(
     "Close tabs opened by the current bb-browser session",
     {},
     handlers.browser_close_all,
+  );
+  server.tool(
+    "browser_frame",
+    "Enter an iframe by CSS selector so snapshots and ref actions target that frame. Refresh the snapshot afterward; refs from a previous frame do not carry over.",
+    {
+      selector: z.string().describe("CSS selector of the iframe element to enter"),
+      tab: z.number().optional().describe("Tab ID to target"),
+    },
+    handlers.browser_frame,
+  );
+  server.tool(
+    "browser_frame_main",
+    "Return snapshots and ref actions to the top-level document",
+    {
+      tab: z.number().optional().describe("Tab ID to target"),
+    },
+    handlers.browser_frame_main,
   );
   server.tool(
     "browser_hover",

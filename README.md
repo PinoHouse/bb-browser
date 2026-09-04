@@ -78,6 +78,7 @@ Tool groups:
 
 - Diagnostics: `browser_health` reports Client/Broker/extension state without opening tabs or running page scripts.
 - Browser: `browser_tab_list`, `browser_open`, `browser_snapshot`, `browser_click`, `browser_fill`, `browser_eval`, `browser_network`, `browser_screenshot`, `browser_close`.
+- Frames: `browser_frame` enters an iframe by CSS selector; `browser_frame_main` returns to the top document. Re-snapshot after switching.
 - Site adapters: `site_list`, `site_search`, `site_info`, `site_recommend`, `site_run`, `site_update`.
 
 `site_run` is the only supported adapter execution path. Adapter execution is capped by an operation deadline; Radar adapters may use up to 120 seconds.
