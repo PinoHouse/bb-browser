@@ -6,6 +6,7 @@
  */
 
 import type { AXNode } from './cdp-service';
+import { FORM_ROLES, VALUE_ROLES, type FormState } from './form-state';
 
 // ============================================================================
 // 类型
@@ -25,6 +26,8 @@ export interface FormatOptions {
   compact?: boolean;
   /** 限制树深度 */
   maxDepth?: number;
+  /** Safe live state only; never field values. */
+  formStates?: Map<number, FormState>;
 }
 
 export interface FormatResult {
@@ -257,6 +260,16 @@ export function formatAXTree(
       };
     }
 
+    if (FORM_ROLES.has(role)) {
+      const state = node.backendDOMNodeId === undefined ? undefined : options.formStates?.get(node.backendDOMNodeId);
+      if (VALUE_ROLES.has(role)) line += ` [value=${state?.valueState ?? 'unknown'}]`;
+      if (state?.autofilled) line += ' [autofill]';
+      if (state?.readOnly) line += ' [readonly]';
+      if (state?.disabled === true) line += ' [disabled]';
+      else if (state?.disabled === false) line += ' [enabled]';
+      else line += ' [disabled=unknown]';
+    }
+
     // link URL 内联（interactive 模式不需要 URL）
     if (!options.interactive && role === 'link' && node.backendDOMNodeId !== undefined) {
       const url = urlMap.get(node.backendDOMNodeId);
@@ -275,6 +288,10 @@ export function formatAXTree(
 
     // interactive 模式：扁平输出，不遍历交互元素的子节点
     if (options.interactive) return;
+
+    // Editable descendants may echo the entered credential as StaticText.
+    // Preserve labels/refs above, but never render their value subtree.
+    if (role === 'textbox' || role === 'searchbox' || role === 'spinbutton') return;
 
     // 递归子节点
     for (const childId of node.childIds || []) {

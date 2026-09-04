@@ -25,6 +25,42 @@ Use the installed bb-browser Plugin MCP to control the user's existing Chrome se
 
 Never close a pre-existing tab merely because it matches the requested domain.
 
+## Autofilled login forms
+
+Browser-painted credentials may not yet be committed to the page's form state.
+Use snapshot metadata without reading credentials: `[value=empty|present|unknown]`,
+`[autofill]` when detected, `[readonly]`, and explicit button `[enabled]`,
+`[disabled]`, or `[disabled=unknown]`. `present` does not prove the intended account
+or successful authentication; unknown or missing state is neither empty nor enabled.
+
+1. Establish the task's authorized site/account scope and explicit tab; technical
+   ability to log in is not authorization. If the expected authenticated page is
+   already visible, continue the task without submitting a login form.
+2. Hand CAPTCHA, 2FA, system unlock, account checkpoints, and account ambiguity to
+   the user. If login is outside the task's authorization, ask for direction rather
+   than submitting. State the concrete unresolved condition, not a guessed login
+   outcome.
+3. On an ordinary form that appears prefilled but not activated, click one freshly
+   located non-submit control, such as the email field, **once**. Wait briefly with
+   a bounded `browser_wait`, then take a fresh snapshot on the same tab. This is
+   activation, not permission to submit; a diagnostic-only task stops here.
+4. Submit **once**, only within an already authorized login task, with the intended
+   site/account unambiguous, all required login fields `[value=present]`, and the
+   submit control explicitly `[enabled]`. Empty/unknown fields or disabled/unknown
+   controls do not meet that gate. If the single activation does not make the form
+   ready, hand off to the user; do not repeat it.
+5. Verify the expected authenticated page or result. A successful click is not a
+   successful login. After a submit timeout, disconnect, or indeterminate result,
+   retain **unknown** and never replay the submission. Reinspect after page or
+   connection changes before deciding what is known; a new snapshot does not reset
+   the one-submit budget.
+
+Do not read, display, or log credential values, lengths, hashes, password-store
+contents, cookies, tokens, or login request/response bodies. Do not use `fill`/`type`
+to clear or re-enter saved passwords, inspect framework internals, blind double-click,
+replay login requests, or use JavaScript submission to bypass disabled controls.
+A disabled-element click error is a stop-and-reinspect signal, not an automatic retry.
+
 ## Site adapters
 
 Use `site_search` or `site_info` to discover arguments, then use `site_run` for normal adapter execution. Do not translate a site adapter call into a CLI command. Pass `tab` when reusing an explicitly selected tab; the Plugin holds a per-tab lease during the adapter run.

@@ -11,7 +11,8 @@
  */
 
 import * as cdp from './cdp-service';
-import { formatAXTree, type AXRefInfo } from './ax-tree-formatter';
+import { formatAXTree } from './ax-tree-formatter';
+import { collectFormStates, readFormState } from './form-state';
 
 // ============================================================================
 // 类型定义
@@ -195,6 +196,7 @@ export async function getSnapshot(
     interactive: options.interactive,
     compact: options.compact,
     maxDepth: options.maxDepth,
+    formStates: await collectFormStates(tabId, axNodes),
   });
 
   // 5. 转换为 RefInfo 并存储
@@ -353,12 +355,25 @@ export async function clickElement(
   const backendNodeId = getBackendNodeId(refInfo);
 
   let x: number, y: number;
-  if (backendNodeId !== null) {
-    ({ x, y } = await getElementCenter(tabId, backendNodeId));
-  } else if (refInfo.xpath) {
-    ({ x, y } = await getElementCenterByXPath(tabId, refInfo.xpath));
-  } else {
-    throw new Error(`No locator for ref "${ref}"`);
+  try {
+    if (backendNodeId !== null) {
+      ({ x, y } = await getElementCenter(tabId, backendNodeId));
+    } else if (refInfo.xpath) {
+      ({ x, y } = await getElementCenterByXPath(tabId, refInfo.xpath));
+    } else {
+      throw new Error('No locator');
+    }
+  } catch {
+    throw new Error('Element location unavailable. Take a fresh snapshot; no click was dispatched.');
+  }
+
+  // Recheck after scrolling: a previously enabled snapshot is not authoritative.
+  // This probe never reads a value and never clicks to activate autofill.
+  const state = await readFormState(tabId, refInfo, false);
+  if (state.disabled !== false) {
+    throw new Error(state.disabled === true
+      ? 'Element is disabled. Take a fresh snapshot; no click was dispatched.'
+      : 'Element state unknown. Take a fresh snapshot; no click was dispatched.');
   }
 
   await cdp.click(tabId, x, y);
